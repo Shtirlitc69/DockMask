@@ -13,3 +13,8 @@
 .idea/
 *.iml
 .vscode/
+
+# IDE
+.idea/
+*.iml
+.vscode/
