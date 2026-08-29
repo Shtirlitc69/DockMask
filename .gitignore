@@ -4,17 +4,15 @@
 *.iml
 .vscode/
 
-# IDE
-.idea/
-*.iml
-.vscode/
+# Python
+__pycache__/
+*.py[cod]
+.venv/
 
-# IDE
-.idea/
-*.iml
-.vscode/
-
-# IDE
-.idea/
-*.iml
-.vscode/
+# App runtime
+deid_service/storage/files/*
+!deid_service/storage/files/.gitkeep
+deid_service/app/static/css/*
+!deid_service/app/static/css/.gitkeep
+deid_service/app/static/js/*
+!deid_service/app/static/js/.gitkeep

@@ -2,6 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
+      <module fileurl="file://$PROJECT_DIR$/.idea/deid-service.iml" filepath="$PROJECT_DIR$/.idea/deid-service.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/dockmask.iml" filepath="$PROJECT_DIR$/.idea/dockmask.iml" />
     </modules>
   </component>
