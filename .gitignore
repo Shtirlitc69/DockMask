@@ -10,9 +10,9 @@ __pycache__/
 .venv/
 
 # App runtime
-deid_service/storage/files/*
-!deid_service/storage/files/.gitkeep
-deid_service/app/static/css/*
-!deid_service/app/static/css/.gitkeep
-deid_service/app/static/js/*
-!deid_service/app/static/js/.gitkeep
+storage/files/*
+!storage/files/.gitkeep
+app/static/css/*
+!app/static/css/.gitkeep
+app/static/js/*
+!app/static/js/.gitkeep

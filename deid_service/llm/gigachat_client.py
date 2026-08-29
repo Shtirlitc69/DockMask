@@ -1,1 +1,0 @@
-"""GigaChat client."""
