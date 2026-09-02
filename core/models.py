@@ -1,150 +1,197 @@
-"""
-Файл для создания всех классов взаимодействия с бд.
-"""
-
+"""Shared, framework-independent domain models for the de-identification pipeline."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
 from uuid import uuid4
 
 
 class JobStatus(str, Enum):
-    """
-    Класс для статусов задач.
-    """
+    """Stable machine-readable job states exposed by the API."""
 
-    PENDING = "Ожидание выполнения"
-    ANALYZING = "Анализируется"
-    DETECTING = "Обнаружение"
-    NEEDS_INPUT = "Нужны данные"
-    REDACTING = "Редактируется"
-    DONE = "Готово"
-    FAILED = "Ошибка"
+    QUEUED = "queued"
+    PROCESSING = "processing"
+    NEEDS_CLARIFICATION = "needs_clarification"
+    DONE = "done"
+    FAILED = "failed"
+
 
 class DocumentFormat(str, Enum):
-    """
-    Класс для форматов файлов.
-    """
-
     PDF = "pdf"
     DOCX = "docx"
     XLSX = "xlsx"
 
+
+class BlockKind(str, Enum):
+    DOCX_PARAGRAPH = "docx_paragraph"
+    DOCX_TABLE_CELL = "docx_table_cell"
+    XLSX_CELL = "xlsx_cell"
+    PDF_TEXT_BLOCK = "pdf_text_block"
+    PDF_OCR_BLOCK = "pdf_ocr_block"
+
+
 class EntityType(str, Enum):
-    """
-    Класс для типов сущностей.
-    Заполню как пришлют датасеты
-    """
-    pass
+    PERSON_NAME = "person_name"
+    ORGANIZATION = "organization"
+    ADDRESS = "address"
+    AMOUNT = "amount"
+    INN = "inn"
+    KPP = "kpp"
+    OGRN = "ogrn"
+    PHONE = "phone"
+    EMAIL = "email"
+    BANK_ACCOUNT = "bank_account"
+    BIK = "bik"
+    CONTRACT_NUMBER = "contract_number"
+
 
 class PartyRole(str, Enum):
-    """
-    Роль стороны в тендерном документе.
-    """
-    SUPPLIER = "supplier"   # поставщик
-    BUYER = "buyer"         # покупатель
+    SUPPLIER = "supplier"
+    BUYER = "buyer"
     UNKNOWN = "unknown"
 
-@dataclass # нужен для того, чтобы можно было создавать объекты класса без явного вызова конструктора
+
+@dataclass(slots=True, frozen=True)
 class Location:
-    """
-    Класс для хранения строк найденных в тексте, которые являются адресами.
-    """
-    # Общее для всех типов файлов
-    page_number: int
-    #PDF
-    paragraph_index: Optional[int] = None
-    #DOCX
-    table_index: Optional[str] = None
-    #DOCX/XLSX
-    row: Optional[int] = None
-    #XLSX/таблицы
-    column: Optional[int] = None
-    sheet_name: Optional[str] = None
-    run_index: Optional[int] = None
-    #DOCX
-    bbox: Optional[tuple[float, float, float, float]] = None
+    """Serializable location of a text block inside a source document.
 
-@dataclass
+    Structural indexes and ``page_number`` are zero-based internally. UI and
+    reports may convert them to one-based values for display.
+    """
+
+    paragraph_index: int | None = None
+    table_index: int | None = None
+    row: int | None = None
+    column: int | None = None
+    cell_paragraph_index: int | None = None
+    sheet_name: str | None = None
+    cell_coordinate: str | None = None
+    page_number: int | None = None
+    bbox: tuple[float, float, float, float] | None = None
+
+
+@dataclass(slots=True)
 class TextBlock:
-    """Один связный кусок текста, извлеченный из документа —
-    абзац DOCX, ячейка таблицы XLSX, текстовый блок PDF."""
-    id: str = field(default_factory=lambda: str(uuid4()))
-    text: str = ""
-    location: Location = field(default_factory=Location)
-    is_table_cell: bool = False
+    """A stable, serializable piece of extracted document text."""
 
-@dataclass
+    block_id: str
+    text: str
+    kind: BlockKind
+    location: Location
+
+    def __post_init__(self) -> None:
+        if not self.block_id:
+            raise ValueError("block_id must not be empty")
+
+
+def _validate_span(text: str, start: int, end: int, confidence: float) -> None:
+    if not 0 <= start < end:
+        raise ValueError("span must satisfy 0 <= start < end")
+    if end - start != len(text):
+        raise ValueError("span length must match the exact source text length")
+    if not 0.0 <= confidence <= 1.0:
+        raise ValueError("confidence must be between 0.0 and 1.0")
+
+
+@dataclass(slots=True)
+class EntitySpan:
+    """An exact entity occurrence returned by a detector or LLM provider."""
+
+    entity_type: EntityType
+    text: str
+    start: int
+    end: int
+    source: str = "llm"
+    confidence: float = 0.8
+
+    def __post_init__(self) -> None:
+        _validate_span(self.text, self.start, self.end, self.confidence)
+
+
+@dataclass(slots=True)
+class Match:
+    """A validated, document-aware replacement command for a redactor."""
+
+    block_id: str
+    entity_type: EntityType
+    text: str
+    start: int
+    end: int
+    replacement: str
+    source: str
+    confidence: float
+    location: Location
+    party_role: PartyRole = PartyRole.UNKNOWN
+    applied: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.block_id:
+            raise ValueError("block_id must not be empty")
+        if not self.replacement:
+            raise ValueError("replacement must not be empty")
+        _validate_span(self.text, self.start, self.end, self.confidence)
+
+
+@dataclass(slots=True)
 class ExtractedDocument:
-    """Результат шага «Анализ документа» — то, что extractor отдаёт
-    дальше в detector."""
     format: DocumentFormat
     blocks: list[TextBlock] = field(default_factory=list)
-    supplier: Optional[str] = None
-    buyer: Optional[str] = None
-    is_scanned: bool = False   # True → перед анализом нужен OCR
+    supplier: str | None = None
+    buyer: str | None = None
+    is_scanned: bool = False
 
 
-
-@dataclass
-class EntitySpan:
-    """Найденная сущность внутри текста одного TextBlock."""
-    text_block_id: str
-    entity_type: EntityType
-    value: str  # сам найденный текст, напр. "ООО Ромашка"
-    start: int  # индекс начала в TextBlock.text
-    end: int  # индекс конца (exclusive)
-    confidence: float = 1.0  # 1.0 для regex-правил, <1.0 для LLM/OCR
-    party_role: PartyRole = PartyRole.UNKNOWN
-    source: str = "rule"  # "rule" | "llm" | "ocr"
-
-
-@dataclass
-class Match:
-    """Связка «что нашли + где именно заменить в файле + чем заменить».
-    Это то, что реально уходит в redactor."""
-    entity: EntitySpan
-    location: Location
-    replacement: str  # напр. "[ОРГАНИЗАЦИЯ_1]"
-    applied: bool = False  # True после того, как redactor внёс замену
-
-@dataclass
+@dataclass(slots=True)
 class ClarifyingQuestion:
-    """Вопрос пользователю, если данных не хватает
-    (например, не удалось определить, кто поставщик, а кто покупатель)."""
-    id: str = field(default_factory=lambda: str(uuid4()))
-    question: str = ""
-    related_entity_type: Optional[EntityType] = None
-    answer: Optional[str] = None
+    question: str
+    related_entity_type: EntityType | None = None
+    question_id: str = field(default_factory=lambda: str(uuid4()))
+    answer: str | None = None
 
-@dataclass
-class Job:
-    id: str = field(default_factory=lambda: str(uuid4()))
-    status: JobStatus = JobStatus.PENDING
+    def __post_init__(self) -> None:
+        if not self.question:
+            raise ValueError("question must not be empty")
 
-    source_filename: str = ""
-    document_format: Optional[DocumentFormat] = None
-    entity_types_requested: list[EntityType] = field(default_factory=list)
 
-    extracted: Optional[ExtractedDocument] = None
+@dataclass(slots=True)
+class PipelineResult:
+    status: JobStatus
+    output_document: str | None = None
+    report: str | None = None
     matches: list[Match] = field(default_factory=list)
+    open_questions: list[ClarifyingQuestion] = field(default_factory=list)
+    error_message: str | None = None
+
+
+@dataclass(slots=True)
+class Job:
+    job_id: str = field(default_factory=lambda: str(uuid4()))
+    status: JobStatus = JobStatus.QUEUED
+    source_filename: str = ""
+    document_format: DocumentFormat | None = None
+    entity_types_requested: list[EntityType] = field(default_factory=list)
     questions: list[ClarifyingQuestion] = field(default_factory=list)
-
-    result_file_path: Optional[str] = None
-    report_file_path: Optional[str] = None
-
-    error_message: Optional[str] = None
+    result_file_path: str | None = None
+    report_file_path: str | None = None
+    total_replacements: int = 0
+    error_message: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
-@dataclass
+
+@dataclass(slots=True)
 class ReportEntry:
-    """Одна строка в итоговом отчёте о заменах."""
     entity_type: EntityType
     original_value: str
     replacement: str
     location: Location
+    source: str
+    confidence: float
+    party_role: PartyRole = PartyRole.UNKNOWN
+    applied: bool = False
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.confidence <= 1.0:
+            raise ValueError("confidence must be between 0.0 and 1.0")
