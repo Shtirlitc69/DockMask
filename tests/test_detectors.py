@@ -1,9 +1,21 @@
-"""Тесты детерминированного поиска структурированных сущностей."""
+"""Тесты обнаружения структурированных и LLM-сущностей."""
 
+import asyncio
 import unittest
+from collections.abc import Sequence
+from unittest.mock import patch
 
+from core.detectors.entity_detector import LLM_MAX_CONCURRENCY, detect_all
 from core.detectors.rule_based import detect_rule_based
-from core.models import EntityType
+from core.models import (
+    BlockKind,
+    EntitySpan,
+    EntityType,
+    Location,
+    PartyRole,
+    TextBlock,
+)
+from llm.base import BaseLLMClient
 
 
 ALL_RULE_TYPES = [
@@ -180,6 +192,321 @@ class RuleBasedDetectorTests(unittest.TestCase):
             self.assertLessEqual(previous.end, current.start)
         for span in spans:
             self.assertEqual(text[span.start : span.end], span.text)
+
+
+class StubLLMClient(BaseLLMClient):
+    def __init__(
+        self,
+        results: dict[str, list[EntitySpan]] | None = None,
+        delays: dict[str, float] | None = None,
+    ) -> None:
+        self.results = results or {}
+        self.delays = delays or {}
+        self.calls: list[tuple[str, tuple[EntityType, ...]]] = []
+
+    async def find_entities(
+        self,
+        text: str,
+        types: Sequence[EntityType],
+    ) -> list[EntitySpan]:
+        self.calls.append((text, tuple(types)))
+        await asyncio.sleep(self.delays.get(text, 0))
+        return list(self.results.get(text, []))
+
+    async def classify_party(
+        self,
+        context_snippet: str,
+        candidate_name: str,
+    ) -> PartyRole | None:
+        return None
+
+
+class ConcurrencyLLMClient(StubLLMClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.active_calls = 0
+        self.max_active_calls = 0
+
+    async def find_entities(
+        self,
+        text: str,
+        types: Sequence[EntityType],
+    ) -> list[EntitySpan]:
+        self.calls.append((text, tuple(types)))
+        self.active_calls += 1
+        self.max_active_calls = max(self.max_active_calls, self.active_calls)
+        try:
+            await asyncio.sleep(0.01)
+            return []
+        finally:
+            self.active_calls -= 1
+
+
+class EntityDetectorTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def block(block_id: str, text: str) -> TextBlock:
+        return TextBlock(
+            block_id=block_id,
+            text=text,
+            kind=BlockKind.DOCX_PARAGRAPH,
+            location=Location(paragraph_index=int(block_id.removeprefix("p:"))),
+        )
+
+    async def test_rule_based_wins_exact_duplicate_from_llm(self) -> None:
+        text = "ООО «Альфа»"
+        rule_span = EntitySpan(
+            EntityType.ORGANIZATION,
+            text,
+            0,
+            len(text),
+            source="rule",
+            confidence=1.0,
+        )
+        llm_span = EntitySpan(
+            EntityType.ORGANIZATION,
+            text,
+            0,
+            len(text),
+            source="llm-test",
+            confidence=0.99,
+        )
+        client = StubLLMClient({text: [llm_span]})
+
+        with patch(
+            "core.detectors.entity_detector.detect_rule_based",
+            return_value=[rule_span],
+        ):
+            result = await detect_all(
+                [self.block("p:0", text)],
+                [EntityType.ORGANIZATION],
+                client,
+            )
+
+        self.assertEqual(len(result["p:0"]), 1)
+        self.assertEqual(result["p:0"][0].source, "rule")
+
+    async def test_llm_overlap_prefers_confidence_then_length(self) -> None:
+        confidence_text = "ООО Ромашка"
+        confidence_spans = [
+            EntitySpan(
+                EntityType.ORGANIZATION,
+                confidence_text,
+                0,
+                len(confidence_text),
+                source="llm-test",
+                confidence=0.6,
+            ),
+            EntitySpan(
+                EntityType.PERSON_NAME,
+                "Ромашка",
+                4,
+                len(confidence_text),
+                source="llm-test",
+                confidence=0.9,
+            ),
+        ]
+        length_text = "Иван Иванов"
+        length_spans = [
+            EntitySpan(
+                EntityType.PERSON_NAME,
+                length_text,
+                0,
+                len(length_text),
+                source="llm-test",
+                confidence=0.8,
+            ),
+            EntitySpan(
+                EntityType.ORGANIZATION,
+                "Иванов",
+                5,
+                len(length_text),
+                source="llm-test",
+                confidence=0.8,
+            ),
+        ]
+        client = StubLLMClient(
+            {
+                confidence_text: confidence_spans,
+                length_text: length_spans,
+            }
+        )
+
+        result = await detect_all(
+            [self.block("p:0", confidence_text), self.block("p:1", length_text)],
+            [EntityType.PERSON_NAME, EntityType.ORGANIZATION],
+            client,
+        )
+
+        self.assertEqual(result["p:0"][0].text, "Ромашка")
+        self.assertEqual(result["p:1"][0].text, length_text)
+
+    async def test_non_overlapping_matches_keep_metadata_and_location(self) -> None:
+        text = "ООО «Альфа» и Иванов Иван Иванович"
+        organization = "ООО «Альфа»"
+        person = "Иванов Иван Иванович"
+        person_start = text.index(person)
+        spans = [
+            EntitySpan(
+                EntityType.PERSON_NAME,
+                person,
+                person_start,
+                person_start + len(person),
+                source="ner-person",
+                confidence=0.82,
+            ),
+            EntitySpan(
+                EntityType.ORGANIZATION,
+                organization,
+                0,
+                len(organization),
+                source="ner-org",
+                confidence=0.91,
+            ),
+        ]
+        block = self.block("p:3", text)
+
+        result = await detect_all(
+            [block],
+            [EntityType.PERSON_NAME, EntityType.ORGANIZATION],
+            StubLLMClient({text: spans}),
+        )
+
+        matches = result["p:3"]
+        self.assertEqual([match.text for match in matches], [organization, person])
+        self.assertEqual(
+            [(match.source, match.confidence) for match in matches],
+            [("ner-org", 0.91), ("ner-person", 0.82)],
+        )
+        self.assertTrue(all(match.block_id == "p:3" for match in matches))
+        self.assertTrue(all(match.location is block.location for match in matches))
+        self.assertLessEqual(matches[0].end, matches[1].start)
+
+    async def test_replacements_are_stable_across_blocks_and_types(self) -> None:
+        first_text = "ООО «Альфа» и ООО «Бета»"
+        second_text = "Иванов Иван Иванович, ООО «Альфа»"
+        alpha = "ООО «Альфа»"
+        beta = "ООО «Бета»"
+        person = "Иванов Иван Иванович"
+
+        client = StubLLMClient(
+            {
+                first_text: [
+                    EntitySpan(
+                        EntityType.ORGANIZATION,
+                        alpha,
+                        first_text.index(alpha),
+                        first_text.index(alpha) + len(alpha),
+                    ),
+                    EntitySpan(
+                        EntityType.ORGANIZATION,
+                        beta,
+                        first_text.index(beta),
+                        first_text.index(beta) + len(beta),
+                    ),
+                ],
+                second_text: [
+                    EntitySpan(
+                        EntityType.PERSON_NAME,
+                        person,
+                        0,
+                        len(person),
+                    ),
+                    EntitySpan(
+                        EntityType.ORGANIZATION,
+                        alpha,
+                        second_text.index(alpha),
+                        second_text.index(alpha) + len(alpha),
+                    ),
+                ],
+            },
+            delays={first_text: 0.02, second_text: 0},
+        )
+
+        result = await detect_all(
+            [self.block("p:0", first_text), self.block("p:1", second_text)],
+            [EntityType.PERSON_NAME, EntityType.ORGANIZATION],
+            client,
+        )
+
+        self.assertEqual(
+            [match.replacement for match in result["p:0"]],
+            ["[ORGANIZATION_1]", "[ORGANIZATION_2]"],
+        )
+        self.assertEqual(
+            [match.replacement for match in result["p:1"]],
+            ["[PERSON_NAME_1]", "[ORGANIZATION_1]"],
+        )
+
+    async def test_llm_is_not_called_for_rule_only_or_empty_blocks(self) -> None:
+        client = StubLLMClient()
+        rule_result = await detect_all(
+            [self.block("p:0", "ИНН 7707083893")],
+            [EntityType.INN],
+            client,
+        )
+        empty_result = await detect_all(
+            [self.block("p:1", ""), self.block("p:2", "   \t")],
+            [EntityType.ORGANIZATION],
+            client,
+        )
+
+        self.assertEqual(client.calls, [])
+        self.assertEqual(rule_result["p:0"][0].entity_type, EntityType.INN)
+        self.assertEqual(empty_result, {"p:1": [], "p:2": []})
+
+    async def test_invalid_and_unrequested_llm_spans_are_discarded(self) -> None:
+        text = "ООО Альфа"
+        valid = EntitySpan(
+            EntityType.ORGANIZATION,
+            text,
+            0,
+            len(text),
+            source="llm-valid",
+            confidence=0.7,
+        )
+        outside = EntitySpan(
+            EntityType.ORGANIZATION,
+            "X",
+            100,
+            101,
+            source="llm-outside",
+            confidence=0.9,
+        )
+        mismatch = EntitySpan(
+            EntityType.ORGANIZATION,
+            "Бета",
+            4,
+            8,
+            source="llm-mismatch",
+            confidence=0.9,
+        )
+        wrong_type = EntitySpan(
+            EntityType.INN,
+            "ООО",
+            0,
+            3,
+            source="llm-wrong-type",
+            confidence=0.9,
+        )
+
+        result = await detect_all(
+            [self.block("p:0", text)],
+            [EntityType.ORGANIZATION],
+            StubLLMClient({text: [outside, mismatch, wrong_type, valid]}),
+        )
+
+        self.assertEqual(len(result["p:0"]), 1)
+        self.assertEqual(result["p:0"][0].source, "llm-valid")
+
+    async def test_llm_parallelism_is_limited(self) -> None:
+        blocks = [self.block(f"p:{index}", f"Организация {index}") for index in range(10)]
+        client = ConcurrencyLLMClient()
+
+        result = await detect_all(blocks, [EntityType.ORGANIZATION], client)
+
+        self.assertEqual(len(client.calls), len(blocks))
+        self.assertEqual(client.max_active_calls, LLM_MAX_CONCURRENCY)
+        self.assertTrue(all(result[block.block_id] == [] for block in blocks))
 
 
 if __name__ == "__main__":
