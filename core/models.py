@@ -1,4 +1,4 @@
-"""Shared, framework-independent domain models for the de-identification pipeline."""
+"""Общие доменные модели, независимые от фреймворка, для конвейера деидентификации."""
 
 from __future__ import annotations
 
@@ -9,13 +9,13 @@ from uuid import uuid4
 
 
 class JobStatus(str, Enum):
-    """Stable machine-readable job states exposed by the API."""
+    """Стабильные статусы задач, доступные через API."""
 
-    QUEUED = "queued"
-    PROCESSING = "processing"
-    NEEDS_CLARIFICATION = "needs_clarification"
-    DONE = "done"
-    FAILED = "failed"
+    QUEUED = "в_очереди"
+    PROCESSING = "обрабатывается"
+    NEEDS_CLARIFICATION = "требует_уточнения"
+    DONE = "готово"
+    FAILED = "не_удалось"
 
 
 class DocumentFormat(str, Enum):
@@ -55,10 +55,10 @@ class PartyRole(str, Enum):
 
 @dataclass(slots=True, frozen=True)
 class Location:
-    """Serializable location of a text block inside a source document.
+    """Сериализуемое расположение текстового блока внутри исходного документа.
 
-    Structural indexes and ``page_number`` are zero-based internally. UI and
-    reports may convert them to one-based values for display.
+    Структурные индексы и ``page_number`` внутренне считаются нуль-индексированными.
+    UI и отчёты могут преобразовывать их в однозначные (one-based) значения для отображения.
     """
 
     paragraph_index: int | None = None
@@ -74,7 +74,7 @@ class Location:
 
 @dataclass(slots=True)
 class TextBlock:
-    """A stable, serializable piece of extracted document text."""
+    """Стабильный, сериализуемый фрагмент извлечённого текста документа."""
 
     block_id: str
     text: str
@@ -83,21 +83,21 @@ class TextBlock:
 
     def __post_init__(self) -> None:
         if not self.block_id:
-            raise ValueError("block_id must not be empty")
+            raise ValueError("block_id не может быть пустым")
 
 
 def _validate_span(text: str, start: int, end: int, confidence: float) -> None:
     if not 0 <= start < end:
-        raise ValueError("span must satisfy 0 <= start < end")
+        raise ValueError("span должен удовлетворять условию 0 <= start < end")
     if end - start != len(text):
-        raise ValueError("span length must match the exact source text length")
+        raise ValueError("длина span должна точно соответствовать длине исходного текста")
     if not 0.0 <= confidence <= 1.0:
-        raise ValueError("confidence must be between 0.0 and 1.0")
+        raise ValueError("confidence должен быть в диапазоне от 0.0 до 1.0")
 
 
 @dataclass(slots=True)
 class EntitySpan:
-    """An exact entity occurrence returned by a detector or LLM provider."""
+    """Точное вхождение сущности, возвращённое детектором или провайдером LLM."""
 
     entity_type: EntityType
     text: str
@@ -112,7 +112,7 @@ class EntitySpan:
 
 @dataclass(slots=True)
 class Match:
-    """A validated, document-aware replacement command for a redactor."""
+    """Проверенная команда замены, учитывающая документ, для редактора."""
 
     block_id: str
     entity_type: EntityType
@@ -128,9 +128,9 @@ class Match:
 
     def __post_init__(self) -> None:
         if not self.block_id:
-            raise ValueError("block_id must not be empty")
+            raise ValueError("block_id не может быть пустым")
         if not self.replacement:
-            raise ValueError("replacement must not be empty")
+            raise ValueError("replacement не может быть пустым")
         _validate_span(self.text, self.start, self.end, self.confidence)
 
 
@@ -152,7 +152,7 @@ class ClarifyingQuestion:
 
     def __post_init__(self) -> None:
         if not self.question:
-            raise ValueError("question must not be empty")
+            raise ValueError("question не может быть пустым")
 
 
 @dataclass(slots=True)
@@ -194,4 +194,4 @@ class ReportEntry:
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.confidence <= 1.0:
-            raise ValueError("confidence must be between 0.0 and 1.0")
+            raise ValueError("confidence должен быть в диапазоне от 0.0 до 1.0")
