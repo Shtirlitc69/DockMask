@@ -2,4 +2,6 @@
 name = "deid-service"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "python-docx>=1.2.0",
+]
