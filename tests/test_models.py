@@ -38,7 +38,7 @@ class DomainModelsTests(unittest.TestCase):
         self.assertEqual(pdf.page_number, 0)
 
     def test_stable_enum_values(self) -> None:
-        self.assertEqual(JobStatus.QUEUED.value, "queued")
+        self.assertEqual(JobStatus.QUEUED.value, "в_очереди")
         self.assertEqual(EntityType.ORGANIZATION.value, "organization")
         self.assertEqual(PartyRole.UNKNOWN.value, "unknown")
 
