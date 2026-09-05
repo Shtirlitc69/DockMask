@@ -1,0 +1,209 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]: 🔒
+      - generic [ref=e7]: DocMask
+    - generic [ref=e8]:
+      - generic [ref=e10]:
+        - generic [ref=e11]: ✓
+        - generic [ref=e12]: Загрузка
+      - generic [ref=e15]:
+        - generic [ref=e16]: ✓
+        - generic [ref=e17]: Обработка
+      - generic [ref=e20]:
+        - generic [ref=e21]: "3"
+        - generic [ref=e22]: Результат
+    - generic [ref=e23]:
+      - button "☀️" [ref=e24]
+      - button "⚙️" [ref=e25]
+  - main [ref=e26]:
+    - generic [ref=e260]:
+      - generic [ref=e261]:
+        - generic [ref=e262]:
+          - generic [ref=e263]: ✓
+          - generic [ref=e264]:
+            - generic [ref=e265]: Замен
+            - generic [ref=e266]: "22"
+        - generic [ref=e268]:
+          - generic [ref=e269]:
+            - generic [ref=e270]: ФИО
+            - generic [ref=e271]: "3"
+          - generic [ref=e272]:
+            - generic [ref=e273]: Фин. сумма
+            - generic [ref=e274]: "3"
+          - generic [ref=e275]:
+            - generic [ref=e276]: ИНН
+            - generic [ref=e277]: "2"
+          - generic [ref=e278]:
+            - generic [ref=e279]: Адрес
+            - generic [ref=e280]: "2"
+          - generic [ref=e281]:
+            - generic [ref=e282]: Телефон
+            - generic [ref=e283]: "2"
+        - button "← Новый документ" [ref=e285]
+      - generic [ref=e286]:
+        - button "Предпросмотр" [ref=e287]
+        - button "Отчёт (22)" [ref=e288]
+        - button "Экспорт" [ref=e289]
+      - generic [ref=e291]:
+        - generic [ref=e292]:
+          - generic [ref=e293]: ℹ
+          - text: Наведите курсор на маркер
+          - generic [ref=e294]: "[...]"
+          - text: чтобы увидеть исходный текст
+        - generic [ref=e296]:
+          - generic [ref=e297]: СЧЁТ-ФАКТУРА № СФ-2024-0891
+          - generic [ref=e298]: от 15 марта 2024 г.
+          - separator [ref=e300]
+          - generic [ref=e302]: ПОСТАВЩИК
+          - generic [ref=e303]:
+            - text: "Наименование:"
+            - generic [ref=e304]: "[ОРГАНИЗАЦИЯ_1]"
+          - generic [ref=e305]:
+            - text: "ИНН / КПП:"
+            - generic [ref=e306]: "[ИНН_1]"
+            - text: /
+            - generic [ref=e307]: "[КПП_1]"
+          - generic [ref=e308]:
+            - text: "ОГРН:"
+            - generic [ref=e309]: "[ОГРН_1]"
+          - generic [ref=e310]:
+            - text: "Адрес:"
+            - generic [ref=e311]: "[АДРЕС_1]"
+          - generic [ref=e312]:
+            - text: "Телефон:"
+            - generic [ref=e313]: "[ТЕЛЕФОН_1]"
+          - generic [ref=e314]:
+            - text: "E-mail:"
+            - generic [ref=e315]: "[EMAIL_1]"
+          - generic [ref=e316]:
+            - text: "Р/с:"
+            - generic [ref=e317]: "[СЧЁТ_1]"
+            - text: в АО «Альфа-Банк», БИК
+            - generic [ref=e318]: "[БИК_1]"
+          - separator [ref=e320]
+          - generic [ref=e322]: ПОКУПАТЕЛЬ
+          - generic [ref=e323]:
+            - text: "ФИО:"
+            - generic [ref=e324]: "[ФИО_1]"
+          - generic [ref=e325]:
+            - text: "Дата рождения:"
+            - generic [ref=e326]: "[ДАТА_РОЖД_1]"
+          - generic [ref=e327]:
+            - text: "Паспорт:"
+            - generic [ref=e328]: "[ПАСПОРТ_1]"
+            - text: ", выдан ОВД Пресненского р-на г. Москвы 20.06.2005"
+          - generic [ref=e329]:
+            - text: "ИНН:"
+            - generic [ref=e330]: "[ИНН_2]"
+          - generic [ref=e331]:
+            - text: "СНИЛС:"
+            - generic [ref=e332]: "[СНИЛС_1]"
+          - generic [ref=e333]:
+            - text: "Адрес:"
+            - generic [ref=e334]: "[АДРЕС_2]"
+          - generic [ref=e335]:
+            - text: "Телефон:"
+            - generic [ref=e336]: "[ТЕЛЕФОН_2]"
+          - generic [ref=e337]:
+            - text: "E-mail:"
+            - generic [ref=e338]: "[EMAIL_2]"
+          - separator [ref=e340]
+          - table [ref=e343]:
+            - rowgroup [ref=e344]:
+              - row "№ Наименование товара / услуги Кол-во Ед. Цена, руб. Сумма, руб." [ref=e345]:
+                - cell "№" [ref=e346]
+                - cell "Наименование товара / услуги" [ref=e347]
+                - cell "Кол-во" [ref=e348]
+                - cell "Ед." [ref=e349]
+                - cell "Цена, руб." [ref=e350]
+                - cell "Сумма, руб." [ref=e351]
+              - row "1 Техническое обслуживание серверного оборудования 1 усл. 85 000,00 85 000,00" [ref=e352]:
+                - cell "1" [ref=e353]
+                - cell "Техническое обслуживание серверного оборудования" [ref=e354]
+                - cell "1" [ref=e355]
+                - cell "усл." [ref=e356]
+                - cell "85 000,00" [ref=e357]
+                - cell "85 000,00" [ref=e358]
+              - row "2 Лицензия ПО «DataGuard Pro» (12 мес.) 3 шт. 12 500,00 37 500,00" [ref=e359]:
+                - cell "2" [ref=e360]
+                - cell "Лицензия ПО «DataGuard Pro» (12 мес.)" [ref=e361]
+                - cell "3" [ref=e362]
+                - cell "шт." [ref=e363]
+                - cell "12 500,00" [ref=e364]
+                - cell "37 500,00" [ref=e365]
+              - row "3 Консультационные услуги (40 ч. × 2 500,00 руб.) 40 час 2 500,00 100 000,00" [ref=e366]:
+                - cell "3" [ref=e367]
+                - cell "Консультационные услуги (40 ч. × 2 500,00 руб.)" [ref=e368]
+                - cell "40" [ref=e369]
+                - cell "час" [ref=e370]
+                - cell "2 500,00" [ref=e371]
+                - cell "100 000,00" [ref=e372]
+          - generic [ref=e374]:
+            - text: "Итого без НДС:"
+            - generic [ref=e375]: "[СУММА_1]"
+          - generic [ref=e376]:
+            - text: "НДС 20%:"
+            - generic [ref=e377]: "[СУММА_2]"
+          - generic [ref=e378]:
+            - text: "ИТОГО К ОПЛАТЕ:"
+            - generic [ref=e379]: "[СУММА_3]"
+          - generic [ref=e381]: Оплата по договору № КД-2024/15 от 01.03.2024 г. в течение 10 банковских дней с момента выставления счёта.
+          - separator [ref=e383]
+          - generic [ref=e385]:
+            - text: "Подпись поставщика:"
+            - generic [ref=e386]: "[ФИО_2]"
+            - text: ", Генеральный директор"
+          - generic [ref=e387]:
+            - text: "Подпись покупателя:"
+            - generic [ref=e388]: "[ФИО_3]"
+  - generic [ref=e87]:
+    - generic [ref=e88]:
+      - generic [ref=e89]: Настройки
+      - button "✕" [ref=e90]
+    - generic [ref=e92]:
+      - generic [ref=e93]: Настройки AI-агента
+      - generic [ref=e94]:
+        - text: Провайдер
+        - combobox [ref=e95]:
+          - option "GigaChat (Sber)" [selected]
+          - option "OpenAI / совместимый"
+          - option "LLaMA (локальный)"
+          - option "Custom endpoint"
+      - generic [ref=e96]:
+        - text: Base URL
+        - textbox [ref=e97]: https://gigachat.devices.sberbank.ru
+      - generic [ref=e98]:
+        - text: API-ключ
+        - textbox "sk-... или Bearer token" [ref=e99]
+      - generic [ref=e100]:
+        - text: Модель
+        - textbox [ref=e101]: GigaChat-Pro
+      - generic [ref=e102]:
+        - generic [ref=e103]:
+          - generic [ref=e104]: Температура
+          - generic [ref=e105]: "0.10"
+        - slider [ref=e106]: "0.1"
+      - generic [ref=e107]:
+        - generic [ref=e108]:
+          - generic [ref=e109]: Max tokens
+          - generic [ref=e110]: "4096"
+        - slider [ref=e111]: "4096"
+      - separator [ref=e112]
+      - generic [ref=e113]:
+        - generic [ref=e114]:
+          - generic [ref=e115]: Токены доступа
+          - button "+ Добавить" [ref=e116]
+        - generic [ref=e119]:
+          - generic [ref=e122]:
+            - generic [ref=e123]:
+              - generic [ref=e124]: GigaChat Production
+              - generic [ref=e125]: активен
+            - generic [ref=e126]:
+              - generic [ref=e127]: GigaChat (Sber)
+              - generic [ref=e128]: MDY0Y2...VVc=
+            - generic [ref=e129]: Добавлен 2024-03-15
+          - generic [ref=e130]:
+            - button "👁" [ref=e131]
+            - button "📋" [ref=e132]
+            - button "🗑" [ref=e133]

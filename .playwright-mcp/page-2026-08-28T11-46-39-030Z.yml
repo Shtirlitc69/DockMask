@@ -1,0 +1,86 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]: 🔒
+      - generic [ref=e7]: DocMask
+    - generic [ref=e8]:
+      - generic [ref=e10]:
+        - generic [ref=e11]: ✓
+        - generic [ref=e12]: Загрузка
+      - generic [ref=e15]:
+        - generic [ref=e16]: "2"
+        - generic [ref=e17]: Обработка
+      - generic [ref=e20]:
+        - generic [ref=e21]: "3"
+        - generic [ref=e22]: Результат
+    - generic [ref=e23]:
+      - button "☀️" [ref=e24]
+      - button "⚙️" [ref=e25]
+  - main [ref=e26]:
+    - generic [ref=e138]:
+      - generic [ref=e139]:
+        - generic [ref=e140]: 📄
+        - generic [ref=e141]: invoice-2024.pdf
+        - generic [ref=e142]: Извлечение структуры документа
+        - generic [ref=e144]: 0 / 8 шагов
+      - generic [ref=e145]:
+        - generic [ref=e149]:
+          - generic [ref=e150]: Извлечение структуры документа
+          - generic [ref=e151]: Метаданные, шрифты, таблицы, разметка
+        - generic [ref=e156]: Определение типа документа
+        - generic [ref=e161]: Обнаружение сканированных страниц
+        - generic [ref=e166]: OCR-распознавание текста
+        - generic [ref=e171]: Анализ конфиденциальных данных
+        - generic [ref=e176]: Применение масок
+        - generic [ref=e181]: Проверка полноты обезличивания
+        - generic [ref=e186]: Генерация отчёта
+  - generic [ref=e87]:
+    - generic [ref=e88]:
+      - generic [ref=e89]: Настройки
+      - button "✕" [ref=e90]
+    - generic [ref=e92]:
+      - generic [ref=e93]: Настройки AI-агента
+      - generic [ref=e94]:
+        - text: Провайдер
+        - combobox [ref=e95]:
+          - option "GigaChat (Sber)" [selected]
+          - option "OpenAI / совместимый"
+          - option "LLaMA (локальный)"
+          - option "Custom endpoint"
+      - generic [ref=e96]:
+        - text: Base URL
+        - textbox [ref=e97]: https://gigachat.devices.sberbank.ru
+      - generic [ref=e98]:
+        - text: API-ключ
+        - textbox "sk-... или Bearer token" [ref=e99]
+      - generic [ref=e100]:
+        - text: Модель
+        - textbox [ref=e101]: GigaChat-Pro
+      - generic [ref=e102]:
+        - generic [ref=e103]:
+          - generic [ref=e104]: Температура
+          - generic [ref=e105]: "0.10"
+        - slider [ref=e106]: "0.1"
+      - generic [ref=e107]:
+        - generic [ref=e108]:
+          - generic [ref=e109]: Max tokens
+          - generic [ref=e110]: "4096"
+        - slider [ref=e111]: "4096"
+      - separator [ref=e112]
+      - generic [ref=e113]:
+        - generic [ref=e114]:
+          - generic [ref=e115]: Токены доступа
+          - button "+ Добавить" [ref=e116]
+        - generic [ref=e119]:
+          - generic [ref=e122]:
+            - generic [ref=e123]:
+              - generic [ref=e124]: GigaChat Production
+              - generic [ref=e125]: активен
+            - generic [ref=e126]:
+              - generic [ref=e127]: GigaChat (Sber)
+              - generic [ref=e128]: MDY0Y2...VVc=
+            - generic [ref=e129]: Добавлен 2024-03-15
+          - generic [ref=e130]:
+            - button "👁" [ref=e131]
+            - button "📋" [ref=e132]
+            - button "🗑" [ref=e133]
