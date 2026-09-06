@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from core.models import EntitySpan, EntityType, PartyRole
 from llm.base import BaseLLMClient
 
-
 MOCK_SOURCE = "llm-mock"
 MOCK_CONFIDENCE = 0.5
 
