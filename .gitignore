@@ -10,6 +10,10 @@ __pycache__/
 .venv/
 *.egg-info/
 
+# Generated artifacts
+output/
+tmp/
+
 # App runtime
 storage/files/*
 !storage/files/.gitkeep

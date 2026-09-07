@@ -1,94 +1,172 @@
 from __future__ import annotations
 
-from uuid import uuid4
+import asyncio
+from pathlib import PurePath
+from typing import Annotated
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 
+from app.dependencies import (
+    ConfigService,
+    HealthService,
+    JobNotFoundError,
+    JobService,
+    ServiceUnavailableError,
+    get_config_service,
+    get_health_service,
+    get_job_service,
+)
 from app.schemas import (
     AnswerBatchRequest,
+    AnswerBatchResponse,
     ConfigResponse,
     ConfigUpdateRequest,
     HealthResponse,
     JobCreateResponse,
     JobStatusResponse,
 )
+from core.models import DocumentFormat, EntityType
 
-router = APIRouter()
+MAX_UPLOAD_SIZE_BYTES = 50 * 1024 * 1024
+_DOCUMENT_FORMATS = {item.value: item for item in DocumentFormat}
 
-_STORAGE: dict[str, dict[str, object]] = {}
-_CONFIG_API_KEY: str | None = None
+router = APIRouter(prefix="/api")
 
 
-@router.post("/api/jobs", response_model=JobCreateResponse)
+def _api_error(status_code: int, code: str) -> HTTPException:
+    return HTTPException(status_code=status_code, detail=code)
+
+
+def _safe_filename(filename: str | None) -> str:
+    if filename is None:
+        return ""
+    return PurePath(filename.replace("\\", "/")).name
+
+
+def _parse_entity_types(values: list[str] | None) -> tuple[EntityType, ...]:
+    if not values:
+        raise _api_error(status.HTTP_422_UNPROCESSABLE_CONTENT, "entity_types_required")
+
+    parsed: list[EntityType] = []
+    seen: set[EntityType] = set()
+    try:
+        for value in values:
+            entity_type = EntityType(value)
+            if entity_type not in seen:
+                parsed.append(entity_type)
+                seen.add(entity_type)
+    except ValueError:
+        raise _api_error(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_entity_type") from None
+    return tuple(parsed)
+
+
+def _measure_and_rewind(file: UploadFile) -> int:
+    file.file.seek(0, 2)
+    size = file.file.tell()
+    file.file.seek(0)
+    return size
+
+
+async def _validated_upload(
+    file: UploadFile | None,
+    entity_types: list[str] | None,
+    ocr_enabled: bool,
+) -> tuple[UploadFile, tuple[EntityType, ...]]:
+    if file is None:
+        raise _api_error(status.HTTP_422_UNPROCESSABLE_CONTENT, "file_required")
+
+    filename = _safe_filename(file.filename)
+    if not filename:
+        raise _api_error(status.HTTP_422_UNPROCESSABLE_CONTENT, "file_required")
+
+    suffix = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if suffix not in _DOCUMENT_FORMATS:
+        raise _api_error(status.HTTP_422_UNPROCESSABLE_CONTENT, "unsupported_document_format")
+    if ocr_enabled:
+        raise _api_error(status.HTTP_422_UNPROCESSABLE_CONTENT, "ocr_not_available")
+
+    size = await asyncio.to_thread(_measure_and_rewind, file)
+    if size == 0:
+        raise _api_error(status.HTTP_422_UNPROCESSABLE_CONTENT, "empty_file")
+    if size > MAX_UPLOAD_SIZE_BYTES:
+        raise _api_error(status.HTTP_422_UNPROCESSABLE_CONTENT, "file_too_large")
+
+    file.filename = filename
+    return file, _parse_entity_types(entity_types)
+
+
+def _raise_service_error(exc: ServiceUnavailableError) -> None:
+    raise _api_error(status.HTTP_503_SERVICE_UNAVAILABLE, exc.code) from None
+
+
+@router.post("/jobs", response_model=JobCreateResponse)
 async def create_job(
-    file: UploadFile = File(...),
-    entity_types: list[str] = Form(...),
-    ocr_enabled: bool = Form(False),
+    file: Annotated[UploadFile | None, File()] = None,
+    entity_types: Annotated[list[str] | None, Form()] = None,
+    ocr_enabled: Annotated[bool, Form()] = False,
+    service: JobService = Depends(get_job_service),
 ) -> JobCreateResponse:
-    if not file.filename:
-        raise HTTPException(status_code=422, detail="file is required")
-    if not entity_types:
-        raise HTTPException(status_code=422, detail="entity_types is required")
-
-    job_id = str(uuid4())
-    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
-    record = {
-        "job_id": job_id,
-        "status": "queued",
-        "progress": 0,
-        "questions": [],
-        "source_filename": file.filename,
-        "document_format": ext,
-        "error": None,
-    }
-    _STORAGE[job_id] = record
-    return JobCreateResponse(
-        job_id=job_id,
-        status=record["status"],
-        source_filename=record["source_filename"],
-        document_format=record["document_format"],
-    )
+    upload, parsed_types = await _validated_upload(file, entity_types, ocr_enabled)
+    try:
+        return await service.create_job(file=upload, entity_types=parsed_types, ocr_enabled=False)
+    except ServiceUnavailableError as exc:
+        _raise_service_error(exc)
 
 
-@router.get("/api/jobs/{job_id}", response_model=JobStatusResponse)
-async def get_job_status(job_id: str) -> JobStatusResponse:
-    record = _STORAGE.get(job_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail="job not found")
-    return JobStatusResponse(
-        job_id=job_id,
-        status=str(record["status"]),
-        progress=int(record.get("progress", 0)),
-        questions=list(record.get("questions", [])),
-        error=str(record["error"]) if record.get("error") else None,
-    )
+@router.get("/jobs/{job_id}", response_model=JobStatusResponse)
+async def get_job_status(
+    job_id: str,
+    service: JobService = Depends(get_job_service),
+) -> JobStatusResponse:
+    try:
+        return await service.get_job(job_id)
+    except JobNotFoundError:
+        raise _api_error(status.HTTP_404_NOT_FOUND, "job_not_found") from None
+    except ServiceUnavailableError as exc:
+        _raise_service_error(exc)
 
 
-@router.post("/api/jobs/{job_id}/answers")
-async def submit_answers(job_id: str, payload: AnswerBatchRequest) -> dict[str, object]:
-    if job_id not in _STORAGE:
-        raise HTTPException(status_code=404, detail="job not found")
+@router.post("/jobs/{job_id}/answers", response_model=AnswerBatchResponse)
+async def submit_answers(
+    job_id: str,
+    payload: AnswerBatchRequest,
+    service: JobService = Depends(get_job_service),
+) -> AnswerBatchResponse:
     if not payload.answers:
-        raise HTTPException(status_code=422, detail="answers cannot be empty")
-    record = _STORAGE[job_id]
-    record["status"] = "queued"
-    record["questions"] = []
-    return {"accepted": True, "job_id": job_id, "answers_count": len(payload.answers)}
+        raise _api_error(status.HTTP_422_UNPROCESSABLE_CONTENT, "answers_required")
+    try:
+        return await service.submit_answers(job_id, payload)
+    except JobNotFoundError:
+        raise _api_error(status.HTTP_404_NOT_FOUND, "job_not_found") from None
+    except ServiceUnavailableError as exc:
+        _raise_service_error(exc)
 
 
-@router.get("/api/config", response_model=ConfigResponse)
-async def get_config() -> ConfigResponse:
-    return ConfigResponse(feature_flags={"ocr_enabled": False}, has_api_key=_CONFIG_API_KEY is not None)
+@router.get("/config", response_model=ConfigResponse)
+async def get_config(service: ConfigService = Depends(get_config_service)) -> ConfigResponse:
+    try:
+        return await service.get_config()
+    except ServiceUnavailableError as exc:
+        _raise_service_error(exc)
 
 
-@router.put("/api/config", response_model=ConfigResponse)
-async def put_config(payload: ConfigUpdateRequest) -> ConfigResponse:
-    global _CONFIG_API_KEY
-    if payload.api_key is not None:
-        _CONFIG_API_KEY = payload.api_key
-    return ConfigResponse(feature_flags={"ocr_enabled": False}, has_api_key=_CONFIG_API_KEY is not None)
+@router.put("/config", response_model=ConfigResponse)
+async def put_config(
+    payload: ConfigUpdateRequest,
+    service: ConfigService = Depends(get_config_service),
+) -> ConfigResponse:
+    api_key = payload.api_key.get_secret_value() if payload.api_key is not None else None
+    try:
+        return await service.update_config(api_key=api_key)
+    except ServiceUnavailableError as exc:
+        _raise_service_error(exc)
+    finally:
+        api_key = None
 
 
-@router.get("/api/health", response_model=HealthResponse)
-async def health() -> HealthResponse:
-    return HealthResponse(status="ok", db="ok", worker="ok")
+@router.get("/health", response_model=HealthResponse)
+async def health(service: HealthService = Depends(get_health_service)) -> HealthResponse:
+    try:
+        return await service.get_health()
+    except ServiceUnavailableError as exc:
+        _raise_service_error(exc)
