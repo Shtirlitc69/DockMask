@@ -9,13 +9,13 @@ from uuid import uuid4
 
 
 class JobStatus(str, Enum):
-    """Стабильные статусы задач, доступные через API."""
+    """Stable task statuses exposed through the API."""
 
-    QUEUED = "в_очереди"
-    PROCESSING = "обрабатывается"
-    NEEDS_CLARIFICATION = "требует_уточнения"
-    DONE = "готово"
-    FAILED = "не_удалось"
+    QUEUED = "queued"
+    PROCESSING = "processing"
+    NEEDS_CLARIFICATION = "needs_clarification"
+    DONE = "done"
+    FAILED = "failed"
 
 
 class DocumentFormat(str, Enum):
