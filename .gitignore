@@ -8,6 +8,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+*.egg-info/
 
 # App runtime
 storage/files/*
