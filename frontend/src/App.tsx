@@ -7,7 +7,7 @@ import {
   MOCK_QUESTIONS,
   INITIAL_PROCESSING_STEPS,
   DEFAULT_DATA_TYPES,
-} from './mockData';
+} from './mocks/mockData';
 import type {
   AppStep,
   Theme,

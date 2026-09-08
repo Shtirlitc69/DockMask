@@ -5,19 +5,21 @@
     "lib": ["ES2020", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "skipLibCheck": true,
+    
     "moduleResolution": "bundler",
-    "baseUrl": ".",
-    "paths": {
-      "@/*": ["app/frontend/src/*"]
-    },
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
     "jsx": "react-jsx",
-    "types": ["node"],
+    
     "strict": true,
-    "noFallthroughCasesInSwitch": true
+    "noFallthroughCasesInSwitch": true,
+    "types": ["node"],
+    
+    "paths": {
+      "@/*": ["./src/*"]
+    }
   },
-  "include": ["app/frofrontend/vite.config.tsite.config.ts"]
+  "include": ["src", "vite.config.ts", "src/mocks/mockData.ts"]
 }

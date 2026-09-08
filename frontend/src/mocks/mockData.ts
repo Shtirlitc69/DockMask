@@ -5,7 +5,7 @@ import type {
   ClarifyingQuestion,
   ProcessingStepDef,
   DataTypeOption,
-} from './types';
+} from '../types';
 
 // ---------------------------------------------------------------------------
 // Document content: realistic Russian invoice with inline replacement markers
