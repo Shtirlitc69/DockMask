@@ -1,6 +1,15 @@
 // frontend/src/api/client.ts
 
-const BASE_URL = '/api'; // Или ваш URL бэкенда
+import type {
+  UploadDocumentRequest,
+  UploadDocumentResponse,
+  DocumentStatusResponse,
+  ClarificationQuestionDto,
+  AnswerQuestionRequest,
+  DocumentResultResponse,
+} from './dto';
+
+const BASE_URL = '/api';
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1000;
 
@@ -13,7 +22,6 @@ class ApiError extends Error {
 }
 
 class ApiClient {
-  // Базовый метод запроса с логикой Retries и AbortController
   private async request<T>(
     method: 'GET' | 'POST' | 'PUT' | 'DELETE',
     endpoint: string,
@@ -28,34 +36,29 @@ class ApiClient {
           method,
           headers: data instanceof FormData ? undefined : { 'Content-Type': 'application/json' },
           body: data instanceof FormData ? data : data ? JSON.stringify(data) : undefined,
-          signal, // Передаем AbortSignal для отмены запроса
+          signal,
         });
 
         if (!response.ok) {
-          // Если ошибка 4xx (клиентская), не ретраим, сразу падаем
           if (response.status >= 400 && response.status < 500) {
             const errorData = await response.json().catch(() => ({}));
             throw new ApiError(errorData.message || 'Client Error', response.status);
           }
-          // Если 5xx (серверная), пробуем ретрай
           throw new ApiError(`Server Error: ${response.status}`, response.status);
         }
 
         return await response.json();
       } catch (error: any) {
-        // Если запрос был отменен вручную (AbortController), сразу выходим
         if (error.name === 'AbortError') {
           throw error;
         }
 
         lastError = error;
 
-        // Если это последняя попытка, пробрасываем ошибку
         if (attempt === MAX_RETRIES) {
           break;
         }
 
-        // Exponential backoff: ждем 1с, потом 2с, потом 4с перед следующим ретраем
         const delay = RETRY_DELAY_MS * Math.pow(2, attempt);
         await new Promise(resolve => setTimeout(resolve, delay));
       }
@@ -63,8 +66,6 @@ class ApiClient {
 
     throw lastError || new Error('Unknown API error');
   }
-
-  // --- Публичные методы API ---
 
   async uploadDocument(data: UploadDocumentRequest, signal?: AbortSignal) {
     const formData = new FormData();

@@ -1,6 +1,6 @@
 // frontend/src/hooks/useDocumentPolling.ts
 import { useEffect, useRef, useState } from 'react';
-import { apiClient } from '../api/client';
+import { apiClient } from '../api/clients';
 import { DocumentStatusResponse } from '../api/dto';
 import { mapBackendStatusToUi, MappedStatus } from '../api/statusMapper';
 

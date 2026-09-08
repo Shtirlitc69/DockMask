@@ -1,4 +1,4 @@
-export type AppStep = 'upload' | 'processing' | 'clarifying' | 'results';
+export type AppStep = 'upload' | 'processing' | 'clarification' | 'results';
 export type Theme = 'dark' | 'light';
 export type AIProviderType = 'gigachat' | 'openai' | 'llama' | 'custom';
 
@@ -18,6 +18,7 @@ export interface UploadedFile {
   mimeType: string;
   isScanned: boolean;
   pageCount: number;
+  rawFile: File;
 }
 
 export interface DocSegment {
