@@ -1,0 +1,124 @@
+name: Build Windows Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, for example 0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dockmask-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    name: Build and publish DockMask.exe
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Validate release version
+        id: release
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = $env:RELEASE_VERSION.Trim()
+          if ($version.StartsWith("v")) {
+            $version = $version.Substring(1)
+          }
+
+          $semver = '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$'
+          if ($version -notmatch $semver) {
+            throw "Invalid version. Use a value such as 0.1.0 or 0.2.0-rc.1."
+          }
+
+          $tag = "v$version"
+          $existingTag = git tag --list $tag
+          if ($existingTag) {
+            throw "Tag $tag already exists. Choose a new release version."
+          }
+
+          $releaseTags = gh release list `
+            --repo $env:GITHUB_REPOSITORY `
+            --limit 1000 `
+            --json tagName `
+            --jq '.[].tagName'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to check existing GitHub Releases."
+          }
+          if ($releaseTags -contains $tag) {
+            throw "Release $tag already exists. Choose a new release version."
+          }
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.10.2"
+          enable-cache: true
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10.17.1"
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Build and verify Windows executable
+        shell: pwsh
+        run: ./scripts/build_windows.ps1
+
+      - name: Verify release asset
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path "output/exe/DockMask.exe" -ErrorAction Stop
+          if ((Get-Item $exe).Length -eq 0) {
+            throw "DockMask.exe is empty."
+          }
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DockMask-${{ steps.release.outputs.tag }}-windows-x64
+          path: output/exe/DockMask.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          gh release create $env:RELEASE_TAG "output/exe/DockMask.exe" `
+            --repo $env:GITHUB_REPOSITORY `
+            --target main `
+            --title "DockMask $env:RELEASE_VERSION" `
+            --generate-notes
