@@ -1929,11 +1929,10 @@ export default function App() {
     setCancelling(true)
     setError(null)
     try {
-      await apiClient.cancelJob(jobId)
-      polling.stopPolling()
+      const cancelled = await apiClient.cancelJob(jobId)
       setClarifyingOpen(false)
-      setJobId(null)
-      setStep("upload")
+      setStep(cancelled.status === "cancelled" ? "cancelled" : "processing")
+      setPollRevision((value) => value + 1)
     } catch (reason) {
       setError(reason instanceof ApiError ? reason.code : "connection_failed")
     } finally {
