@@ -1929,9 +1929,9 @@ export default function App() {
     setCancelling(true)
     setError(null)
     try {
-      const cancelled = await apiClient.cancelJob(jobId)
+      await apiClient.cancelJob(jobId)
       setClarifyingOpen(false)
-      setStep(cancelled.status === "cancelled" ? "cancelled" : "processing")
+      setStep("processing")
       setPollRevision((value) => value + 1)
     } catch (reason) {
       setError(reason instanceof ApiError ? reason.code : "connection_failed")
