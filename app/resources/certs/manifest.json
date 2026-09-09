@@ -1,0 +1,7 @@
+{
+  "source": "https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt",
+  "downloaded_at": "2026-09-09",
+  "not_after": "2032-02-27T21:04:15Z",
+  "hash_encoding": "PEM with CRLF line endings and no trailing newline",
+  "sha256": "936A43FEA6E8E525BCC0F81ACD9C3D21B4FC4B9B68ACEA7906D698005AFC6504"
+}

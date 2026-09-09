@@ -15,6 +15,7 @@ output/
 tmp/
 frontend/node_modules/
 frontend/dist/
+.pnpm-store/
 
 # App runtime
 storage/files/*

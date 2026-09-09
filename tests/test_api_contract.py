@@ -13,6 +13,7 @@ from app.schemas import (
     AnswerBatchRequest,
     AnswerBatchResponse,
     ConfigResponse,
+    ConfigUpdateRequest,
     HealthResponse,
     JobCreateResponse,
     JobStatusResponse,
@@ -83,7 +84,13 @@ class FakeConfigService:
             has_api_key=self.stored_api_key is not None,
         )
 
-    async def update_config(self, *, api_key: str | None) -> ConfigResponse:
+    async def update_config(
+        self,
+        payload: ConfigUpdateRequest,
+        *,
+        api_key: str | None,
+    ) -> ConfigResponse:
+        del payload
         if api_key is not None:
             self.stored_api_key = api_key
         return await self.get_config()
@@ -216,7 +223,8 @@ def test_config_key_is_write_only(caplog: pytest.LogCaptureFixture) -> None:
 
     assert updated.status_code == 200
     assert fetched.status_code == 200
-    assert updated.json() == {"feature_flags": {"ocr_enabled": False}, "has_api_key": True}
+    assert updated.json()["feature_flags"] == {"ocr_enabled": False}
+    assert updated.json()["has_api_key"] is True
     assert fetched.json() == updated.json()
     assert secret not in updated.text
     assert secret not in fetched.text

@@ -14,7 +14,8 @@ class StubStructuredClient(StructuredLLMClient):
     def __init__(self, content: str) -> None:
         self.content = content
 
-    async def _complete(self, prompt, response_schema):
+    async def _complete(self, prompt, response_schema, *, system_prompt=None):
+        del prompt, response_schema, system_prompt
         return self.content
 
 

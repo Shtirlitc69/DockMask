@@ -8,7 +8,6 @@ from re import Pattern
 
 from core.models import EntitySpan, EntityType
 
-
 _SEPARATOR = r"[ \t]*(?::|№)?[ \t]*"
 _VALUE_BOUNDARY_START = r"(?<!\d)"
 _VALUE_BOUNDARY_END = r"(?!\d)"

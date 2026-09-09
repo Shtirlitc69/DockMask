@@ -56,9 +56,11 @@ class DomainModelsTests(unittest.TestCase):
             ("x", 0, 1, 1.1),
         )
         for text, start, end, confidence in invalid_cases:
-            with self.subTest(text=text, start=start, end=end, confidence=confidence):
-                with self.assertRaises(ValueError):
-                    EntitySpan(EntityType.PERSON_NAME, text, start, end, confidence=confidence)
+            with (
+                self.subTest(text=text, start=start, end=end, confidence=confidence),
+                self.assertRaises(ValueError),
+            ):
+                EntitySpan(EntityType.PERSON_NAME, text, start, end, confidence=confidence)
 
     def test_match_is_flat_and_serializable(self) -> None:
         match = Match(

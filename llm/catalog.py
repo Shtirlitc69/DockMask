@@ -7,7 +7,6 @@ from typing import Protocol, runtime_checkable
 import httpx
 
 from llm.factory import get_llm_client
-from llm.gigachat_client import GigaChatError, GigaChatHTTPError
 from llm.http_utils import LLMHTTPError, LLMProviderError
 from llm.structured import LLMResponseError
 from llm.types import LLMClientConfig, LLMModelInfo, LLMValidationResult
@@ -48,7 +47,7 @@ async def validate_llm_connection(
             "invalid_configuration",
             "Invalid LLM configuration",
         )
-    except (LLMHTTPError, GigaChatHTTPError) as exc:
+    except LLMHTTPError as exc:
         if exc.status_code in {401, 403}:
             code = "authentication_failed"
         elif exc.status_code == 404:
@@ -56,7 +55,7 @@ async def validate_llm_connection(
         else:
             code = "provider_error"
         return LLMValidationResult(False, code, "LLM connection validation failed")
-    except (LLMProviderError, GigaChatError, httpx.HTTPError):
+    except (LLMProviderError, httpx.HTTPError):
         return LLMValidationResult(False, "connection_failed", "LLM connection failed")
     except LLMResponseError:
         return LLMValidationResult(

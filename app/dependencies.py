@@ -8,6 +8,7 @@ instead of pretending that in-memory state is durable.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 from fastapi import Request, UploadFile
@@ -16,9 +17,14 @@ from app.schemas import (
     AnswerBatchRequest,
     AnswerBatchResponse,
     ConfigResponse,
+    ConfigUpdateRequest,
+    ConfigValidationRequest,
+    ConfigValidationResponse,
     HealthResponse,
     JobCreateResponse,
     JobStatusResponse,
+    ModelsResponse,
+    ReportResponse,
 )
 from core.models import EntityType
 
@@ -34,6 +40,10 @@ class ServiceUnavailableError(RuntimeError):
 
 class JobNotFoundError(LookupError):
     """The requested job does not exist."""
+
+
+class JobStateError(RuntimeError):
+    """The requested result is not available in the current job state."""
 
 
 class JobService(Protocol):
@@ -53,11 +63,29 @@ class JobService(Protocol):
         payload: AnswerBatchRequest,
     ) -> AnswerBatchResponse: ...
 
+    async def get_artifact(self, job_id: str, kind: str) -> DownloadArtifact: ...
+
+    async def get_report(self, job_id: str) -> ReportResponse: ...
+
 
 class ConfigService(Protocol):
     async def get_config(self) -> ConfigResponse: ...
 
-    async def update_config(self, *, api_key: str | None) -> ConfigResponse: ...
+    async def update_config(
+        self,
+        payload: ConfigUpdateRequest,
+        *,
+        api_key: str | None,
+    ) -> ConfigResponse: ...
+
+    async def validate_config(
+        self,
+        payload: ConfigValidationRequest,
+        *,
+        api_key: str | None,
+    ) -> ConfigValidationResponse: ...
+
+    async def list_models(self, provider: str, base_url: str | None) -> ModelsResponse: ...
 
 
 class HealthService(Protocol):
@@ -87,15 +115,42 @@ class UnavailableJobService:
         del job_id, payload
         raise ServiceUnavailableError()
 
+    async def get_artifact(self, job_id: str, kind: str) -> DownloadArtifact:
+        del job_id, kind
+        raise ServiceUnavailableError()
+
+    async def get_report(self, job_id: str) -> ReportResponse:
+        del job_id
+        raise ServiceUnavailableError()
+
 
 class UnavailableConfigService:
     async def get_config(self) -> ConfigResponse:
         return ConfigResponse(feature_flags={"ocr_enabled": False}, has_api_key=False)
 
-    async def update_config(self, *, api_key: str | None) -> ConfigResponse:
+    async def update_config(
+        self,
+        payload: ConfigUpdateRequest,
+        *,
+        api_key: str | None,
+    ) -> ConfigResponse:
+        del payload
         if api_key is not None:
             raise ServiceUnavailableError("secret_store_unavailable")
         return await self.get_config()
+
+    async def validate_config(
+        self,
+        payload: ConfigValidationRequest,
+        *,
+        api_key: str | None,
+    ) -> ConfigValidationResponse:
+        del payload, api_key
+        raise ServiceUnavailableError()
+
+    async def list_models(self, provider: str, base_url: str | None) -> ModelsResponse:
+        del provider, base_url
+        raise ServiceUnavailableError()
 
 
 class UnavailableHealthService:
@@ -108,6 +163,13 @@ class AppServices:
     jobs: JobService
     config: ConfigService
     health: HealthService
+
+
+@dataclass(slots=True, frozen=True)
+class DownloadArtifact:
+    path: Path
+    media_type: str
+    filename: str
 
 
 def default_services() -> AppServices:

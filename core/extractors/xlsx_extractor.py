@@ -21,7 +21,7 @@ class XlsxExtractor:
 
     def extract(self, file_path: str | Path) -> ExtractedDocument:
         path = Path(file_path)
-        workbook = load_workbook(path, read_only=True, data_only=True)
+        workbook = load_workbook(path, read_only=True, data_only=False)
         blocks: list[TextBlock] = []
 
         try:
@@ -29,11 +29,11 @@ class XlsxExtractor:
                 for row_index, row in enumerate(sheet.iter_rows()):
                     for column_index, cell in enumerate(row):
                         value = cell.value
-                        if value is None:
+                        if value is None or cell.data_type == "f":
                             continue
 
                         text = self._normalize_cell_value(value)
-                        if not text:
+                        if not text.strip():
                             continue
 
                         blocks.append(
@@ -59,7 +59,7 @@ class XlsxExtractor:
     def _normalize_cell_value(value: Any) -> str:
         if value is None:
             return ""
-        return str(value).strip()
+        return str(value)
 
 
 def extract_xlsx(file_path: str | Path) -> ExtractedDocument:

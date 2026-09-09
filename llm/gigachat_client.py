@@ -14,11 +14,19 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from core.models import EntitySpan, EntityType, PartyRole
 from llm.base import BaseLLMClient
+from llm.http_utils import LLMHTTPError, LLMProviderError
+from llm.prompts import (
+    ENTITY_SYSTEM_PROMPT,
+    PARTY_SYSTEM_PROMPT,
+    ROLE_RESPONSE_SCHEMA,
+    build_entity_prompt,
+    build_party_prompt,
+    entity_response_schema,
+)
 from llm.structured import (
     EntitiesResponse,
     LLMResponseError,
     RoleResponse,
-    entity_schema,
     parse_model_json,
     to_entity_spans,
 )
@@ -35,16 +43,19 @@ GIGACHAT_CONFIDENCE = 0.8
 USER_AGENT = "DockMask/0.1"
 
 
-class GigaChatError(RuntimeError):
+class GigaChatError(LLMProviderError):
     """Base error raised by the GigaChat adapter."""
 
 
-class GigaChatHTTPError(GigaChatError):
+class GigaChatHTTPError(GigaChatError, LLMHTTPError):
     """A safe HTTP error which never includes response bodies or secrets."""
 
     def __init__(self, status_code: int) -> None:
         self.status_code = status_code
-        super().__init__(f"GigaChat HTTP request failed with status {status_code}")
+        LLMProviderError.__init__(
+            self,
+            f"GigaChat HTTP request failed with status {status_code}",
+        )
 
 
 class _TokenResponse(BaseModel):
@@ -126,14 +137,10 @@ class GigaChatClient(BaseLLMClient):
         if not text or not requested:
             return []
 
-        type_values = ", ".join(sorted(item.value for item in requested))
         content = await self._complete(
-            "Извлеки из исходного текста только сущности запрошенных типов. "
-            "Верни только JSON вида "
-            '{"entities":[{"type":"person_name","text":"точный текст"}]}. '
-            "Не меняй регистр, пробелы или пунктуацию значения. "
-            f"Запрошенные типы: {type_values}.\nИсходный текст:\n{text}",
-            response_schema=entity_schema(requested),
+            build_entity_prompt(text, requested),
+            response_schema=entity_response_schema(requested),
+            system_prompt=ENTITY_SYSTEM_PROMPT,
         )
         payload = parse_model_json(content, EntitiesResponse)
         return to_entity_spans(
@@ -154,21 +161,9 @@ class GigaChatClient(BaseLLMClient):
             return None
 
         content = await self._complete(
-            "Определи роль указанной стороны только по контексту. "
-            'Верни только JSON вида {"role":"supplier"}, где role — '
-            "supplier, buyer или unknown.\n"
-            f"Сторона: {candidate_name}\nКонтекст:\n{context_snippet}",
-            response_schema={
-                "type": "object",
-                "properties": {
-                    "role": {
-                        "type": "string",
-                        "enum": ["supplier", "buyer", "unknown"],
-                    }
-                },
-                "required": ["role"],
-                "additionalProperties": False,
-            },
+            build_party_prompt(context_snippet, candidate_name),
+            response_schema=ROLE_RESPONSE_SCHEMA,
+            system_prompt=PARTY_SYSTEM_PROMPT,
         )
         role = PartyRole(parse_model_json(content, RoleResponse).role)
         return None if role is PartyRole.UNKNOWN else role
@@ -231,10 +226,16 @@ class GigaChatClient(BaseLLMClient):
         self,
         prompt: str,
         response_schema: dict[str, object],
+        *,
+        system_prompt: str | None = None,
     ) -> str:
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
         payload = {
             "model": self._model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": messages,
             "response_format": {
                 "type": "json_schema",
                 "schema": response_schema,

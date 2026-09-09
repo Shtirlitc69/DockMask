@@ -12,6 +12,14 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from core.models import EntitySpan, EntityType, PartyRole
 from llm.base import BaseLLMClient
+from llm.prompts import (
+    ENTITY_SYSTEM_PROMPT,
+    PARTY_SYSTEM_PROMPT,
+    ROLE_RESPONSE_SCHEMA,
+    build_entity_prompt,
+    build_party_prompt,
+    entity_response_schema,
+)
 
 LOGGER = logging.getLogger(__name__)
 ModelT = TypeVar("ModelT", bound=BaseModel)
@@ -40,42 +48,9 @@ class RoleResponse(BaseModel):
     role: Literal["supplier", "buyer", "unknown"]
 
 
-def entity_schema(requested: frozenset[EntityType]) -> dict[str, object]:
-    return {
-        "type": "object",
-        "properties": {
-            "entities": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "type": {
-                            "type": "string",
-                            "enum": sorted(item.value for item in requested),
-                        },
-                        "text": {"type": "string"},
-                    },
-                    "required": ["type", "text"],
-                    "additionalProperties": False,
-                },
-            }
-        },
-        "required": ["entities"],
-        "additionalProperties": False,
-    }
-
-
-ROLE_SCHEMA: dict[str, object] = {
-    "type": "object",
-    "properties": {
-        "role": {
-            "type": "string",
-            "enum": ["supplier", "buyer", "unknown"],
-        }
-    },
-    "required": ["role"],
-    "additionalProperties": False,
-}
+# Backwards-compatible names kept for adapters and third-party callers.
+entity_schema = entity_response_schema
+ROLE_SCHEMA = ROLE_RESPONSE_SCHEMA
 
 
 def parse_model_json(content: str, model: type[ModelT]) -> ModelT:
@@ -159,15 +134,11 @@ class StructuredLLMClient(BaseLLMClient):
         requested = frozenset(types)
         if not text or not requested:
             return []
-        type_values = ", ".join(sorted(item.value for item in requested))
-        prompt = (
-            "Извлеки из исходного текста только сущности запрошенных типов. "
-            "Верни только JSON вида "
-            '{"entities":[{"type":"person_name","text":"точный текст"}]}. '
-            "Не меняй регистр, пробелы или пунктуацию значения. "
-            f"Запрошенные типы: {type_values}.\nИсходный текст:\n{text}"
+        content = await self._complete(
+            build_entity_prompt(text, requested),
+            entity_response_schema(requested),
+            system_prompt=ENTITY_SYSTEM_PROMPT,
         )
-        content = await self._complete(prompt, entity_schema(requested))
         payload = parse_model_json(content, EntitiesResponse)
         return to_entity_spans(
             text,
@@ -184,12 +155,11 @@ class StructuredLLMClient(BaseLLMClient):
     ) -> PartyRole | None:
         if not context_snippet or not candidate_name:
             return None
-        prompt = (
-            "Определи роль указанной стороны только по контексту. "
-            '{"role":"supplier"}, где role — supplier, buyer или unknown.\n'
-            f"Сторона: {candidate_name}\nКонтекст:\n{context_snippet}"
+        content = await self._complete(
+            build_party_prompt(context_snippet, candidate_name),
+            ROLE_RESPONSE_SCHEMA,
+            system_prompt=PARTY_SYSTEM_PROMPT,
         )
-        content = await self._complete(prompt, ROLE_SCHEMA)
         role = PartyRole(parse_model_json(content, RoleResponse).role)
         return None if role is PartyRole.UNKNOWN else role
 
@@ -198,5 +168,7 @@ class StructuredLLMClient(BaseLLMClient):
         self,
         prompt: str,
         response_schema: dict[str, object],
+        *,
+        system_prompt: str | None = None,
     ) -> str:
         """Return the provider's text content for a structured request."""

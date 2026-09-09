@@ -3,6 +3,7 @@
 import asyncio
 import unittest
 from collections.abc import Sequence
+from itertools import pairwise
 from unittest.mock import patch
 
 from core.detectors.entity_detector import LLM_MAX_CONCURRENCY, detect_all
@@ -16,7 +17,6 @@ from core.models import (
     TextBlock,
 )
 from llm.base import BaseLLMClient
-
 
 ALL_RULE_TYPES = [
     EntityType.INN,
@@ -188,7 +188,7 @@ class RuleBasedDetectorTests(unittest.TestCase):
                 (EntityType.EMAIL, "tender@example.ru"),
             ],
         )
-        for previous, current in zip(spans, spans[1:]):
+        for previous, current in pairwise(spans):
             self.assertLessEqual(previous.end, current.start)
         for span in spans:
             self.assertEqual(text[span.start : span.end], span.text)

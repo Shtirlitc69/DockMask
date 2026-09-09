@@ -50,14 +50,20 @@ class OllamaClient(StructuredLLMClient):
         self,
         prompt: str,
         response_schema: dict[str, object],
+        *,
+        system_prompt: str | None = None,
     ) -> str:
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
         response = await request_with_retries(
             self.source,
             lambda: self._http_client.post(
                 f"{self._base_url}/api/chat",
                 json={
                     "model": self._model,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "messages": messages,
                     "format": response_schema,
                     "stream": False,
                     "options": {"temperature": 0},

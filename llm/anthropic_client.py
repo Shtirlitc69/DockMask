@@ -62,23 +62,28 @@ class AnthropicClient(StructuredLLMClient):
         self,
         prompt: str,
         response_schema: dict[str, object],
+        *,
+        system_prompt: str | None = None,
     ) -> str:
+        payload = {
+            "model": self._model,
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": prompt}],
+            "output_config": {
+                "format": {
+                    "type": "json_schema",
+                    "schema": response_schema,
+                }
+            },
+        }
+        if system_prompt:
+            payload["system"] = system_prompt
         response = await request_with_retries(
             self.source,
             lambda: self._http_client.post(
                 f"{ANTHROPIC_BASE_URL}/messages",
                 headers=self._headers(),
-                json={
-                    "model": self._model,
-                    "max_tokens": 1024,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "output_config": {
-                        "format": {
-                            "type": "json_schema",
-                            "schema": response_schema,
-                        }
-                    },
-                },
+                json=payload,
                 timeout=self._timeout,
                 follow_redirects=False,
             ),

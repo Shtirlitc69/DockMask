@@ -1,41 +1,64 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from "react"
 
-import { apiClient } from '../api/clients';
-import { mapBackendStatusToUi, type MappedStatus } from '../api/statusMapper';
+import { apiClient } from "../api/clients"
+import type { JobStatusResponse } from "../api/dto"
+import { mapBackendStatusToUi, type MappedStatus } from "../api/statusMapper"
 
-const POLL_INTERVAL_MS = 2000;
+const POLL_INTERVAL_MS = 2000
 
-export function useDocumentPolling(jobId: string | null) {
-  const [mappedStatus, setMappedStatus] = useState<MappedStatus | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const abortControllerRef = useRef<AbortController | null>(null);
+export function useDocumentPolling(jobId: string | null, revision = 0) {
+  const [mappedStatus, setMappedStatus] = useState<MappedStatus | null>(null)
+  const [job, setJob] = useState<JobStatusResponse | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const abortControllerRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
-    if (!jobId) return;
+    if (!jobId) return
 
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-    let timeoutId: number | undefined;
+    const controller = new AbortController()
+
+    abortControllerRef.current = controller
+
+    let timeoutId: number | undefined
 
     const poll = async () => {
       try {
-        const response = await apiClient.getJob(jobId, controller.signal);
-        setMappedStatus(mapBackendStatusToUi(response.status, response.progress));
-        if (!['done', 'failed', 'needs_clarification'].includes(response.status) && !controller.signal.aborted) {
-          timeoutId = window.setTimeout(poll, POLL_INTERVAL_MS);
+        const response = await apiClient.getJob(jobId, controller.signal)
+        setJob(response)
+        setMappedStatus(
+          mapBackendStatusToUi(response.status, response.progress),
+        )
+
+        if (
+          !["done", "failed", "needs_clarification"].includes(
+            response.status,
+          ) &&
+          !controller.signal.aborted
+        ) {
+          timeoutId = window.setTimeout(poll, POLL_INTERVAL_MS)
         }
       } catch (reason) {
-        if (reason instanceof DOMException && reason.name === 'AbortError') return;
-        setError(reason instanceof Error ? reason.message : 'connection_failed');
+        if (reason instanceof DOMException && reason.name === "AbortError")
+          return
+
+        setError(reason instanceof Error ? reason.message : "connection_failed")
       }
-    };
+    }
 
-    void poll();
+    void poll()
+
     return () => {
-      controller.abort();
-      if (timeoutId !== undefined) clearTimeout(timeoutId);
-    };
-  }, [jobId]);
+      controller.abort()
 
-  return { mappedStatus, error, stopPolling: () => abortControllerRef.current?.abort() };
+      if (timeoutId !== undefined) clearTimeout(timeoutId)
+    }
+  }, [jobId, revision])
+
+  return {
+    job,
+    mappedStatus,
+    error,
+    stopPolling: () => abortControllerRef.current?.abort(),
+  }
 }

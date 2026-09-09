@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from core.models import DocumentFormat, EntityType, JobStatus
+from llm.types import ProviderId
 
 
 class QuestionResponse(BaseModel):
@@ -13,13 +14,14 @@ class QuestionResponse(BaseModel):
     question_id: str
     question: str
     related_entity_type: EntityType | None = None
+    options: list[str] = Field(default_factory=list)
 
 
 class JobAnswer(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     question_id: str
-    answer: str
+    answer: Literal["supplier", "buyer", "unknown"]
 
 
 class AnswerBatchRequest(BaseModel):
@@ -61,12 +63,92 @@ class ConfigResponse(BaseModel):
 
     feature_flags: dict[str, bool] = Field(default_factory=dict)
     has_api_key: bool = False
+    provider: ProviderId = ProviderId.MOCK
+    model: str = "mock"
+    base_url: str | None = None
+    providers: list[ProviderResponse] = Field(default_factory=list)
+    certificate: CertificateResponse | None = None
 
 
 class ConfigUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     api_key: SecretStr | None = None
+    provider: ProviderId | None = None
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+    base_url: str | None = Field(default=None, max_length=2048)
+    clear_api_key: bool = False
+
+
+class ConfigValidationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: ProviderId
+    model: str = Field(min_length=1, max_length=200)
+    base_url: str | None = Field(default=None, max_length=2048)
+    api_key: SecretStr | None = None
+
+
+class ConfigValidationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ok: bool
+    code: str
+    message: str
+    certificate: CertificateResponse | None = None
+
+
+class CertificateResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    state: Literal["ready", "expiring", "expired", "missing", "integrity_failed"]
+    expires_at: str | None = None
+
+
+class ProviderResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: ProviderId
+    display_name: str
+    available: bool
+    requires_base_url: bool
+    api_key_optional: bool
+    development_only: bool = False
+    recommended_models: list[str] = Field(default_factory=list)
+
+
+class ModelsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    models: list[ModelResponse] = Field(default_factory=list)
+
+
+class ModelResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    display_name: str
+    capabilities: list[str] = Field(default_factory=list)
+
+
+class ReplacementResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    entity_type: EntityType
+    original_value: str
+    replacement: str
+    location: dict[str, object | None]
+    source: str
+    confidence: float = Field(ge=0, le=1)
+    party_role: Literal["supplier", "buyer", "unknown"]
+    applied: bool
+
+
+class ReportResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    total_replacements: int = Field(ge=0)
+    replacements: list[ReplacementResponse]
 
 
 class HealthResponse(BaseModel):

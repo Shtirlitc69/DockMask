@@ -7,7 +7,6 @@ import re
 from core.models import EntityType, Match, PartyRole, TextBlock
 from llm.base import BaseLLMClient
 
-
 _PARTY_ENTITY_TYPES = frozenset(
     {EntityType.ORGANIZATION, EntityType.PERSON_NAME}
 )

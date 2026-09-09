@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from uuid import uuid4
 
@@ -149,6 +149,7 @@ class ClarifyingQuestion:
     related_entity_type: EntityType | None = None
     question_id: str = field(default_factory=lambda: str(uuid4()))
     answer: str | None = None
+    options: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.question:
@@ -160,6 +161,7 @@ class PipelineResult:
     status: JobStatus
     output_document: str | None = None
     report: str | None = None
+    xlsx_report: str | None = None
     matches: list[Match] = field(default_factory=list)
     open_questions: list[ClarifyingQuestion] = field(default_factory=list)
     error_message: str | None = None
@@ -177,8 +179,8 @@ class Job:
     report_file_path: str | None = None
     total_replacements: int = 0
     error_message: str | None = None
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 @dataclass(slots=True)

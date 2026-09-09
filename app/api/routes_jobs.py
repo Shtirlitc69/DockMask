@@ -4,13 +4,15 @@ import asyncio
 from pathlib import PurePath
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi.responses import FileResponse
 
 from app.dependencies import (
     ConfigService,
     HealthService,
     JobNotFoundError,
     JobService,
+    JobStateError,
     ServiceUnavailableError,
     get_config_service,
     get_health_service,
@@ -21,9 +23,13 @@ from app.schemas import (
     AnswerBatchResponse,
     ConfigResponse,
     ConfigUpdateRequest,
+    ConfigValidationRequest,
+    ConfigValidationResponse,
     HealthResponse,
     JobCreateResponse,
     JobStatusResponse,
+    ModelsResponse,
+    ReportResponse,
 )
 from core.models import DocumentFormat, EntityType
 
@@ -31,6 +37,9 @@ MAX_UPLOAD_SIZE_BYTES = 50 * 1024 * 1024
 _DOCUMENT_FORMATS = {item.value: item for item in DocumentFormat}
 
 router = APIRouter(prefix="/api")
+JobServiceDependency = Annotated[JobService, Depends(get_job_service)]
+ConfigServiceDependency = Annotated[ConfigService, Depends(get_config_service)]
+HealthServiceDependency = Annotated[HealthService, Depends(get_health_service)]
 
 
 def _api_error(status_code: int, code: str) -> HTTPException:
@@ -101,10 +110,10 @@ def _raise_service_error(exc: ServiceUnavailableError) -> None:
 
 @router.post("/jobs", response_model=JobCreateResponse)
 async def create_job(
+    service: JobServiceDependency,
     file: Annotated[UploadFile | None, File()] = None,
     entity_types: Annotated[list[str] | None, Form()] = None,
     ocr_enabled: Annotated[bool, Form()] = False,
-    service: JobService = Depends(get_job_service),
 ) -> JobCreateResponse:
     upload, parsed_types = await _validated_upload(file, entity_types, ocr_enabled)
     try:
@@ -116,7 +125,7 @@ async def create_job(
 @router.get("/jobs/{job_id}", response_model=JobStatusResponse)
 async def get_job_status(
     job_id: str,
-    service: JobService = Depends(get_job_service),
+    service: JobServiceDependency,
 ) -> JobStatusResponse:
     try:
         return await service.get_job(job_id)
@@ -130,7 +139,7 @@ async def get_job_status(
 async def submit_answers(
     job_id: str,
     payload: AnswerBatchRequest,
-    service: JobService = Depends(get_job_service),
+    service: JobServiceDependency,
 ) -> AnswerBatchResponse:
     if not payload.answers:
         raise _api_error(status.HTTP_422_UNPROCESSABLE_CONTENT, "answers_required")
@@ -138,12 +147,16 @@ async def submit_answers(
         return await service.submit_answers(job_id, payload)
     except JobNotFoundError:
         raise _api_error(status.HTTP_404_NOT_FOUND, "job_not_found") from None
+    except JobStateError:
+        raise _api_error(status.HTTP_409_CONFLICT, "invalid_job_state") from None
+    except ValueError:
+        raise _api_error(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_answers") from None
     except ServiceUnavailableError as exc:
         _raise_service_error(exc)
 
 
 @router.get("/config", response_model=ConfigResponse)
-async def get_config(service: ConfigService = Depends(get_config_service)) -> ConfigResponse:
+async def get_config(service: ConfigServiceDependency) -> ConfigResponse:
     try:
         return await service.get_config()
     except ServiceUnavailableError as exc:
@@ -153,19 +166,96 @@ async def get_config(service: ConfigService = Depends(get_config_service)) -> Co
 @router.put("/config", response_model=ConfigResponse)
 async def put_config(
     payload: ConfigUpdateRequest,
-    service: ConfigService = Depends(get_config_service),
+    service: ConfigServiceDependency,
 ) -> ConfigResponse:
     api_key = payload.api_key.get_secret_value() if payload.api_key is not None else None
     try:
-        return await service.update_config(api_key=api_key)
+        return await service.update_config(payload, api_key=api_key)
+    except ValueError:
+        raise _api_error(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_configuration") from None
     except ServiceUnavailableError as exc:
         _raise_service_error(exc)
     finally:
         api_key = None
 
 
+@router.post("/config/validate", response_model=ConfigValidationResponse)
+async def validate_config(
+    payload: ConfigValidationRequest,
+    service: ConfigServiceDependency,
+) -> ConfigValidationResponse:
+    api_key = payload.api_key.get_secret_value() if payload.api_key is not None else None
+    try:
+        return await service.validate_config(payload, api_key=api_key)
+    except ServiceUnavailableError as exc:
+        _raise_service_error(exc)
+    finally:
+        api_key = None
+
+
+@router.get("/config/models", response_model=ModelsResponse)
+async def config_models(
+    service: ConfigServiceDependency,
+    provider: str = Query(),
+    base_url: str | None = Query(default=None),
+) -> ModelsResponse:
+    try:
+        return await service.list_models(provider, base_url)
+    except ValueError:
+        raise _api_error(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_configuration") from None
+    except ServiceUnavailableError as exc:
+        _raise_service_error(exc)
+
+
+async def _artifact_response(job_id: str, kind: str, service: JobService) -> FileResponse:
+    try:
+        artifact = await service.get_artifact(job_id, kind)
+    except JobNotFoundError:
+        raise _api_error(status.HTTP_404_NOT_FOUND, "job_not_found") from None
+    except JobStateError:
+        raise _api_error(status.HTTP_409_CONFLICT, "result_not_ready") from None
+    except ServiceUnavailableError as exc:
+        _raise_service_error(exc)
+    return FileResponse(
+        artifact.path,
+        media_type=artifact.media_type,
+        filename=artifact.filename,
+    )
+
+
+@router.get("/jobs/{job_id}/document")
+async def get_document(
+    job_id: str,
+    service: JobServiceDependency,
+) -> FileResponse:
+    return await _artifact_response(job_id, "document", service)
+
+
+@router.get("/jobs/{job_id}/report", response_model=ReportResponse)
+async def get_report(
+    job_id: str,
+    service: JobServiceDependency,
+) -> ReportResponse:
+    try:
+        return await service.get_report(job_id)
+    except JobNotFoundError:
+        raise _api_error(status.HTTP_404_NOT_FOUND, "job_not_found") from None
+    except JobStateError:
+        raise _api_error(status.HTTP_409_CONFLICT, "result_not_ready") from None
+    except ServiceUnavailableError as exc:
+        _raise_service_error(exc)
+
+
+@router.get("/jobs/{job_id}/report.xlsx")
+async def get_xlsx_report(
+    job_id: str,
+    service: JobServiceDependency,
+) -> FileResponse:
+    return await _artifact_response(job_id, "xlsx_report", service)
+
+
 @router.get("/health", response_model=HealthResponse)
-async def health(service: HealthService = Depends(get_health_service)) -> HealthResponse:
+async def health(service: HealthServiceDependency) -> HealthResponse:
     try:
         return await service.get_health()
     except ServiceUnavailableError as exc:

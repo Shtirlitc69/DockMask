@@ -67,10 +67,16 @@ class OpenAICompatibleClient(StructuredLLMClient):
         self,
         prompt: str,
         response_schema: dict[str, object],
+        *,
+        system_prompt: str | None = None,
     ) -> str:
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
         payload: dict[str, Any] = {
             "model": self._model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": messages,
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {

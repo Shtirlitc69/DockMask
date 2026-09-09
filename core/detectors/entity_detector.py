@@ -11,7 +11,6 @@ from core.detectors.rule_based import detect_rule_based
 from core.models import EntitySpan, EntityType, Match, TextBlock
 from llm.base import BaseLLMClient
 
-
 RULE_BASED_TYPES = frozenset(
     {
         EntityType.INN,

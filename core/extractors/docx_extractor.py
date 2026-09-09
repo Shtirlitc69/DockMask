@@ -28,8 +28,8 @@ class DocxExtractor:
 
         # Абзацы
         for paragraph_index, paragraph in enumerate(document.paragraphs):
-            text = paragraph.text.strip()
-            if not text:
+            text = paragraph.text
+            if not text.strip():
                 continue
             blocks.append(
                 TextBlock(
@@ -44,21 +44,26 @@ class DocxExtractor:
         for table_index, table in enumerate(document.tables):
             for row_index, row in enumerate(table.rows):
                 for column_index, cell in enumerate(row.cells):
-                    text = cell.text.strip()
-                    if not text:
-                        continue
-                    blocks.append(
-                        TextBlock(
-                            block_id=f"docx_table_{table_index}_r{row_index}_c{column_index}",
-                            text=text,
-                            kind=BlockKind.DOCX_TABLE_CELL,
-                            location=Location(
-                                table_index=table_index,
-                                row=row_index,
-                                column=column_index,
-                            ),
+                    for cell_paragraph_index, paragraph in enumerate(cell.paragraphs):
+                        text = paragraph.text
+                        if not text.strip():
+                            continue
+                        blocks.append(
+                            TextBlock(
+                                block_id=(
+                                    f"docx_table_{table_index}_r{row_index}_c{column_index}"
+                                    f"_p{cell_paragraph_index}"
+                                ),
+                                text=text,
+                                kind=BlockKind.DOCX_TABLE_CELL,
+                                location=Location(
+                                    table_index=table_index,
+                                    row=row_index,
+                                    column=column_index,
+                                    cell_paragraph_index=cell_paragraph_index,
+                                ),
+                            )
                         )
-                    )
 
         return ExtractedDocument(
             format=DocumentFormat.DOCX,
