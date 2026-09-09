@@ -37,13 +37,15 @@ describe("local API client", () => {
       }),
     )
 
-    await new ApiClient().listModels(
-      "openai_compatible",
-      "https://router.example/v1",
-    )
+    await new ApiClient().listModels({
+      provider: "openai_compatible",
+      base_url: "https://router.example/v1",
+    })
 
-    const [url] = fetchMock.mock.calls[0]
-    expect(String(url)).toMatch(/^\/api\/config\/models\?/)
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(String(url)).toBe("/api/config/models")
     expect(String(url)).not.toMatch(/^https?:\/\//)
+    expect(init?.method).toBe("POST")
+    expect(String(init?.body)).toContain("router.example")
   })
 })

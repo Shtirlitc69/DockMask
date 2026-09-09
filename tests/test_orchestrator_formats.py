@@ -6,6 +6,7 @@ import pytest
 from docx import Document
 from openpyxl import Workbook, load_workbook
 
+from core.extractors.ocr.tesseract_provider import TesseractOcrProvider
 from core.models import EntityType, JobStatus
 from core.orchestrator import run_pipeline
 from llm.mock_client import MockLLMClient
@@ -102,7 +103,39 @@ async def test_scanned_pdf_reports_ocr_as_optional_unavailable_feature(tmp_path:
     )
 
     assert without_ocr.error_message == "ocr_required"
-    assert with_ocr.error_message == "ocr_not_available"
+    assert with_ocr.error_message == "ocr_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_bundled_tesseract_ocr_redacts_scanned_pdf(tmp_path: Path) -> None:
+    provider = TesseractOcrProvider(Path("tmp/tesseract"))
+    if not provider.available:
+        pytest.skip("bundled Tesseract runtime has not been prepared")
+    text_document = fitz.open()
+    text_page = text_document.new_page(width=500, height=200)
+    text_page.insert_text((50, 100), "email@example.test", fontsize=28)
+    pixmap = text_page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+    text_document.close()
+    source = tmp_path / "scan.pdf"
+    scan = fitz.open()
+    scan.new_page(width=500, height=200).insert_image(fitz.Rect(0, 0, 500, 200), pixmap=pixmap)
+    scan.save(source)
+    scan.close()
+
+    result = await run_pipeline(
+        source,
+        tmp_path / "result",
+        [EntityType.EMAIL],
+        MockLLMClient(),
+        use_ocr=True,
+        ocr_provider=provider,
+    )
+
+    assert result.status is JobStatus.DONE
+    assert [match.text for match in result.matches] == ["email@example.test"]
+    output = fitz.open(result.output_document)
+    assert "[EMAIL_1]" in output[0].get_text()
+    output.close()
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,7 @@ class JobStatus(str, Enum):
     QUEUED = "queued"
     PROCESSING = "processing"
     NEEDS_CLARIFICATION = "needs_clarification"
+    CANCELLED = "cancelled"
     DONE = "done"
     FAILED = "failed"
 
@@ -70,6 +71,7 @@ class Location:
     cell_coordinate: str | None = None
     page_number: int | None = None
     bbox: tuple[float, float, float, float] | None = None
+    ocr_words: tuple[tuple[int, int, float, float, float, float], ...] | None = None
 
 
 @dataclass(slots=True)
@@ -141,6 +143,7 @@ class ExtractedDocument:
     supplier: str | None = None
     buyer: str | None = None
     is_scanned: bool = False
+    ocr_pages: tuple[int, ...] = ()
 
 
 @dataclass(slots=True)

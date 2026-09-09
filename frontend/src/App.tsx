@@ -1,7 +1,12 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from "react"
 
 import { apiClient, ApiError } from "./api/clients"
-import type { ConfigResponse, EntityType, ProviderId } from "./api/dto"
+import type {
+  ConfigResponse,
+  EntityType,
+  GigaChatScope,
+  ProviderId,
+} from "./api/dto"
 import { DATA_TYPE_OPTIONS, PROCESSING_STEPS } from "./options"
 import { useDocumentPolling } from "./hooks/useDocumentPolling"
 import type {
@@ -31,6 +36,28 @@ function fmtBytes(b: number) {
   if (b < 1048576) return `${(b / 1024).toFixed(1)} КБ`
 
   return `${(b / 1048576).toFixed(1)} МБ`
+}
+
+const PROVIDER_ERROR_LABELS: Record<string, string> = {
+  gigachat_credentials_missing: "не указан ключ авторизации GigaChat",
+  gigachat_authentication_failed: "GigaChat отклонил ключ авторизации",
+  gigachat_scope_mismatch: "ключ не соответствует выбранному типу доступа",
+  gigachat_permission_denied: "для ключа нет доступа к запрошенному ресурсу",
+  gigachat_payment_required: "для ключа недоступна оплачиваемая операция",
+  gigachat_rate_limited: "исчерпан лимит запросов GigaChat",
+  provider_invalid_response: "провайдер вернул некорректный ответ",
+  provider_unavailable: "провайдер временно недоступен",
+  connection_failed: "нет соединения с локальным приложением",
+  certificate_missing: "сертификат GigaChat не найден",
+  certificate_expired: "сертификат GigaChat просрочен",
+  certificate_integrity_failed: "не пройдена проверка сертификата GigaChat",
+  ocr_unavailable: "локальный модуль OCR отсутствует в сборке",
+  ocr_failed: "не удалось распознать сканированный PDF",
+  ocr_no_text: "OCR не обнаружил текста на одной из страниц",
+}
+
+function providerErrorLabel(code: string): string {
+  return PROVIDER_ERROR_LABELS[code] ?? code
 }
 
 function confidenceColor(c: number) {
@@ -413,6 +440,7 @@ function SettingsDrawer({
   const [model, setModel] = useState("")
   const [baseUrl, setBaseUrl] = useState("")
   const [apiKey, setApiKey] = useState("")
+  const [scope, setScope] = useState<GigaChatScope>("GIGACHAT_API_PERS")
   const [models, setModels] = useState<string[]>([])
   const [status, setStatus] = useState<string>("")
   const selected = config?.providers.find((item) => item.id === provider)
@@ -430,6 +458,7 @@ function SettingsDrawer({
         setProvider(value.provider)
         setModel(value.model)
         setBaseUrl(value.base_url ?? "")
+        setScope(value.scope ?? "GIGACHAT_API_PERS")
         setModels(
           value.providers.find((item) => item.id === value.provider)
             ?.recommended_models ?? [],
@@ -451,6 +480,7 @@ function SettingsDrawer({
     provider,
     model,
     ...(baseUrl ? { base_url: baseUrl } : {}),
+    ...(provider === "gigachat" ? { scope } : {}),
     ...(apiKey ? { api_key: apiKey } : {}),
   })
 
@@ -466,7 +496,7 @@ function SettingsDrawer({
     } catch (error) {
       setStatus(
         `Проверка не выполнена: ${
-          error instanceof ApiError ? error.code : "connection_failed"
+          providerErrorLabel(error instanceof ApiError ? error.code : "connection_failed")
         }`,
       )
     }
@@ -475,7 +505,12 @@ function SettingsDrawer({
   const loadModels = async () => {
     setStatus("Загрузка моделей…")
     try {
-      const result = await apiClient.listModels(provider, baseUrl || null)
+      const result = await apiClient.listModels({
+        provider,
+        ...(baseUrl ? { base_url: baseUrl } : {}),
+        ...(provider === "gigachat" ? { scope } : {}),
+        ...(apiKey ? { api_key: apiKey } : {}),
+      })
       setModels(result.models.map((item) => item.id))
       setStatus(
         result.models.length
@@ -485,7 +520,7 @@ function SettingsDrawer({
     } catch (error) {
       setStatus(
         `Модели не загружены: ${
-          error instanceof ApiError ? error.code : "connection_failed"
+          providerErrorLabel(error instanceof ApiError ? error.code : "connection_failed")
         }. ID можно ввести вручную.`,
       )
     }
@@ -498,6 +533,7 @@ function SettingsDrawer({
         provider,
         model,
         base_url: baseUrl || null,
+        scope: provider === "gigachat" ? scope : null,
         ...(apiKey ? { api_key: apiKey } : {}),
       })
       setConfig(value)
@@ -508,7 +544,7 @@ function SettingsDrawer({
     } catch (error) {
       setStatus(
         `Настройки не сохранены: ${
-          error instanceof ApiError ? error.code : "connection_failed"
+          providerErrorLabel(error instanceof ApiError ? error.code : "connection_failed")
         }`,
       )
     }
@@ -615,6 +651,21 @@ function SettingsDrawer({
               />
             </label>
           )}
+          {provider === "gigachat" && (
+            <label className="block text-xs">
+              Тип доступа ключа
+              <select
+                value={scope}
+                onChange={(event) => setScope(event.target.value as GigaChatScope)}
+                className="mt-1 w-full rounded border px-3 py-2"
+                style={{ background: "var(--secondary)", borderColor: "var(--border)" }}
+              >
+                <option value="GIGACHAT_API_PERS">Физическое лицо (PERS / Freemium)</option>
+                <option value="GIGACHAT_API_B2B">ИП или юридическое лицо (B2B)</option>
+                <option value="GIGACHAT_API_CORP">Корпоративный доступ (CORP)</option>
+              </select>
+            </label>
+          )}
           {provider !== "mock" && provider !== "ollama" && (
             <label className="block text-xs">
               {provider === "gigachat" ? "Ключ авторизации" : "API-ключ"}
@@ -711,12 +762,16 @@ function ClarifyingModal({
   questions,
   onAnswer,
   onConfirm,
+  onCancel,
+  cancelling,
 }: {
   questions: ClarifyingQuestion[]
 
   onAnswer: (qId: string, answer: string) => void
 
   onConfirm: () => void
+  onCancel: () => void
+  cancelling: boolean
 }) {
   const allAnswered = questions.every((q) => q.answer)
 
@@ -828,6 +883,14 @@ function ClarifyingModal({
           className="px-6 py-4 border-t flex justify-end gap-3"
           style={{ borderColor: "var(--border)" }}
         >
+          <button
+            onClick={onCancel}
+            disabled={cancelling}
+            className="px-4 py-2 rounded border text-sm disabled:opacity-40"
+            style={{ borderColor: "var(--border)", color: "var(--muted-foreground)" }}
+          >
+            {cancelling ? "Отмена…" : "Отменить обработку"}
+          </button>
           <button
             onClick={onConfirm}
             disabled={!allAnswered}
@@ -1222,9 +1285,13 @@ function UploadView({
 function ProcessingView({
   steps,
   file,
+  onCancel,
+  cancelling,
 }: {
   steps: ProcessingStepDef[]
   file: UploadedFile | null
+  onCancel: () => void
+  cancelling: boolean
 }) {
   const doneCount = steps.filter((s) => s.status === "done").length
 
@@ -1346,6 +1413,14 @@ function ProcessingView({
             )
           })}
         </div>
+        <button
+          onClick={onCancel}
+          disabled={cancelling}
+          className="w-full py-2 rounded border text-sm transition-colors disabled:opacity-40"
+          style={{ borderColor: "var(--border)", color: "var(--muted-foreground)" }}
+        >
+          {cancelling ? "Отмена…" : "Отменить обработку"}
+        </button>
       </div>
     </div>
   )
@@ -1666,6 +1741,7 @@ export default function App() {
   const [online, setOnline] = useState(true)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [clarifyingOpen, setClarifyingOpen] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
 
   const [isDragging, setIsDragging] = useState(false)
 
@@ -1744,6 +1820,10 @@ export default function App() {
         )
     } else if (job.status === "failed") {
       setError(job.error ?? "pipeline_failed")
+    } else if (job.status === "cancelled") {
+      setClarifyingOpen(false)
+      setJobId(null)
+      setStep("upload")
     }
   }, [polling.error, polling.job])
 
@@ -1811,7 +1891,6 @@ export default function App() {
         entityTypes: dataTypes
           .filter((item) => item.selected)
           .map((item) => item.id as EntityType),
-        ocrEnabled: false,
       })
       setJobId(created.job_id)
       setPollRevision((value) => value + 1)
@@ -1844,6 +1923,23 @@ export default function App() {
       setError(reason instanceof ApiError ? reason.code : "connection_failed")
     }
   }, [jobId, questions])
+
+  const handleCancel = useCallback(async () => {
+    if (!jobId || cancelling) return
+    setCancelling(true)
+    setError(null)
+    try {
+      await apiClient.cancelJob(jobId)
+      polling.stopPolling()
+      setClarifyingOpen(false)
+      setJobId(null)
+      setStep("upload")
+    } catch (reason) {
+      setError(reason instanceof ApiError ? reason.code : "connection_failed")
+    } finally {
+      setCancelling(false)
+    }
+  }, [cancelling, jobId, polling])
 
   const handleDownload = useCallback(
     (fmt: "document" | "json" | "csv" | "xlsx") => {
@@ -1893,6 +1989,7 @@ export default function App() {
 
     setQuestions([])
     setError(null)
+    setCancelling(false)
   }, [])
 
   return (
@@ -1965,7 +2062,7 @@ export default function App() {
             role="alert"
             className="px-5 py-2 text-xs bg-red-500/15 text-red-400"
           >
-            Ошибка: {error}
+            Ошибка: {providerErrorLabel(error)}
           </div>
         )}
         {step === "upload" && (
@@ -1985,7 +2082,12 @@ export default function App() {
         )}
 
         {(step === "processing" || step === "clarifying") && (
-          <ProcessingView steps={processingSteps} file={file} />
+          <ProcessingView
+            steps={processingSteps}
+            file={file}
+            onCancel={() => void handleCancel()}
+            cancelling={cancelling}
+          />
         )}
 
         {step === "results" && (
@@ -2005,6 +2107,8 @@ export default function App() {
           questions={questions}
           onAnswer={handleAnswer}
           onConfirm={handleFinalizeClarifying}
+          onCancel={() => void handleCancel()}
+          cancelling={cancelling}
         />
       )}
 

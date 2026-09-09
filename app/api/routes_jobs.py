@@ -4,7 +4,7 @@ import asyncio
 from pathlib import PurePath
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 
 from app.dependencies import (
@@ -13,6 +13,7 @@ from app.dependencies import (
     JobNotFoundError,
     JobService,
     JobStateError,
+    ModelDiscoveryError,
     ServiceUnavailableError,
     get_config_service,
     get_health_service,
@@ -28,6 +29,7 @@ from app.schemas import (
     HealthResponse,
     JobCreateResponse,
     JobStatusResponse,
+    ModelsRequest,
     ModelsResponse,
     ReportResponse,
 )
@@ -79,7 +81,6 @@ def _measure_and_rewind(file: UploadFile) -> int:
 async def _validated_upload(
     file: UploadFile | None,
     entity_types: list[str] | None,
-    ocr_enabled: bool,
 ) -> tuple[UploadFile, tuple[EntityType, ...]]:
     if file is None:
         raise _api_error(status.HTTP_422_UNPROCESSABLE_CONTENT, "file_required")
@@ -91,9 +92,6 @@ async def _validated_upload(
     suffix = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     if suffix not in _DOCUMENT_FORMATS:
         raise _api_error(status.HTTP_422_UNPROCESSABLE_CONTENT, "unsupported_document_format")
-    if ocr_enabled:
-        raise _api_error(status.HTTP_422_UNPROCESSABLE_CONTENT, "ocr_not_available")
-
     size = await asyncio.to_thread(_measure_and_rewind, file)
     if size == 0:
         raise _api_error(status.HTTP_422_UNPROCESSABLE_CONTENT, "empty_file")
@@ -113,11 +111,10 @@ async def create_job(
     service: JobServiceDependency,
     file: Annotated[UploadFile | None, File()] = None,
     entity_types: Annotated[list[str] | None, Form()] = None,
-    ocr_enabled: Annotated[bool, Form()] = False,
 ) -> JobCreateResponse:
-    upload, parsed_types = await _validated_upload(file, entity_types, ocr_enabled)
+    upload, parsed_types = await _validated_upload(file, entity_types)
     try:
-        return await service.create_job(file=upload, entity_types=parsed_types, ocr_enabled=False)
+        return await service.create_job(file=upload, entity_types=parsed_types)
     except ServiceUnavailableError as exc:
         _raise_service_error(exc)
 
@@ -131,6 +128,18 @@ async def get_job_status(
         return await service.get_job(job_id)
     except JobNotFoundError:
         raise _api_error(status.HTTP_404_NOT_FOUND, "job_not_found") from None
+    except ServiceUnavailableError as exc:
+        _raise_service_error(exc)
+
+
+@router.post("/jobs/{job_id}/cancel", response_model=JobStatusResponse)
+async def cancel_job(job_id: str, service: JobServiceDependency) -> JobStatusResponse:
+    try:
+        return await service.cancel_job(job_id)
+    except JobNotFoundError:
+        raise _api_error(status.HTTP_404_NOT_FOUND, "job_not_found") from None
+    except JobStateError:
+        raise _api_error(status.HTTP_409_CONFLICT, "invalid_job_state") from None
     except ServiceUnavailableError as exc:
         _raise_service_error(exc)
 
@@ -193,18 +202,22 @@ async def validate_config(
         api_key = None
 
 
-@router.get("/config/models", response_model=ModelsResponse)
+@router.post("/config/models", response_model=ModelsResponse)
 async def config_models(
+    payload: ModelsRequest,
     service: ConfigServiceDependency,
-    provider: str = Query(),
-    base_url: str | None = Query(default=None),
 ) -> ModelsResponse:
+    api_key = payload.api_key.get_secret_value() if payload.api_key is not None else None
     try:
-        return await service.list_models(provider, base_url)
+        return await service.list_models(payload, api_key=api_key)
     except ValueError:
         raise _api_error(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_configuration") from None
+    except ModelDiscoveryError as exc:
+        raise _api_error(exc.status_code, exc.code) from None
     except ServiceUnavailableError as exc:
         _raise_service_error(exc)
+    finally:
+        api_key = None
 
 
 async def _artifact_response(job_id: str, kind: str, service: JobService) -> FileResponse:

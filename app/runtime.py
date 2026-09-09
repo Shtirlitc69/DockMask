@@ -22,6 +22,7 @@ from app.dependencies import (
     DownloadArtifact,
     JobNotFoundError,
     JobStateError,
+    ModelDiscoveryError,
     ServiceUnavailableError,
 )
 from app.schemas import (
@@ -36,6 +37,7 @@ from app.schemas import (
     JobCreateResponse,
     JobStatusResponse,
     ModelResponse,
+    ModelsRequest,
     ModelsResponse,
     ProviderResponse,
     QuestionResponse,
@@ -43,9 +45,11 @@ from app.schemas import (
     ReportResponse,
 )
 from core.config import Settings
+from core.extractors.ocr.tesseract_provider import TesseractOcrProvider
 from core.models import DocumentFormat, EntityType, JobStatus, Location, Match, PartyRole
-from core.orchestrator import run_pipeline
+from core.orchestrator import PipelineCancelled, run_pipeline
 from llm import (
+    GigaChatScope,
     LLMClientConfig,
     ProviderId,
     get_llm_client,
@@ -53,7 +57,7 @@ from llm import (
     list_llm_models,
     validate_llm_connection,
 )
-from llm.http_utils import LLMProviderError
+from llm.http_utils import LLMHTTPError, LLMProviderError
 from llm.structured import LLMResponseError
 from llm.types import validate_user_base_url
 from storage.db import Database
@@ -63,7 +67,7 @@ from storage.secrets import KeyringSecretStore, SecretStore, SecretStoreUnavaila
 
 RECOMMENDED_MODELS: dict[ProviderId, list[str]] = {
     ProviderId.MOCK: ["mock"],
-    ProviderId.GIGACHAT: ["GigaChat-2"],
+    ProviderId.GIGACHAT: [],
     ProviderId.OPENAI: ["gpt-4.1-mini"],
     ProviderId.ANTHROPIC: ["claude-sonnet-4-5"],
     ProviderId.OPENAI_COMPATIBLE: [],
@@ -95,6 +99,7 @@ def _serialize_matches(matches: list[Match]) -> list[dict[str, object]]:
                 "cell_coordinate": item.location.cell_coordinate,
                 "page_number": item.location.page_number,
                 "bbox": item.location.bbox,
+                "ocr_words": item.location.ocr_words,
             },
         }
         for item in matches
@@ -108,6 +113,7 @@ def _deserialize_matches(values: list[dict[str, object]]) -> list[Match]:
         if not isinstance(location_value, dict):
             raise TypeError("invalid pending match location")
         bbox_value = location_value.get("bbox")
+        words_value = location_value.get("ocr_words")
         location = Location(
             paragraph_index=location_value.get("paragraph_index"),
             table_index=location_value.get("table_index"),
@@ -118,6 +124,11 @@ def _deserialize_matches(values: list[dict[str, object]]) -> list[Match]:
             cell_coordinate=location_value.get("cell_coordinate"),
             page_number=location_value.get("page_number"),
             bbox=tuple(bbox_value) if isinstance(bbox_value, list) else bbox_value,
+            ocr_words=(
+                tuple(tuple(item) for item in words_value)
+                if isinstance(words_value, list)
+                else words_value
+            ),
         )
         matches.append(
             Match(
@@ -189,11 +200,12 @@ class RuntimeConfigService:
                 )
             )
         return ConfigResponse(
-            feature_flags={"ocr_enabled": False},
+            feature_flags={"ocr_enabled": True},
             has_api_key=secret is not None,
             provider=provider,
             model=config.model,
             base_url=config.base_url,
+            scope=config.scope,
             providers=providers,
             certificate=self._certificate_response(),
         )
@@ -204,6 +216,7 @@ class RuntimeConfigService:
         model: str,
         base_url: str | None,
         api_key: str | None,
+        scope: GigaChatScope | str | None = None,
     ) -> LLMClientConfig:
         normalized_base_url = base_url
         if provider is ProviderId.OPENAI_COMPATIBLE:
@@ -214,11 +227,15 @@ class RuntimeConfigService:
             normalized_base_url = validate_user_base_url(base_url)
         else:
             normalized_base_url = None
+        normalized_scope: str | None = None
+        if provider is ProviderId.GIGACHAT:
+            normalized_scope = GigaChatScope(scope or GigaChatScope.PERS).value
         return LLMClientConfig(
             provider=provider,
             model=model.strip(),
             api_key=api_key,
             base_url=normalized_base_url,
+            scope=normalized_scope,
         )
 
     async def update_config(
@@ -233,7 +250,10 @@ class RuntimeConfigService:
         provider = payload.provider or ProviderId(current.provider)
         model = payload.model or current.model
         base_url = payload.base_url if payload.base_url is not None else current.base_url
-        candidate = self._resolved_candidate(provider, model, base_url, None)
+        scope = payload.scope or (
+            current.scope if ProviderId(current.provider) is provider else None
+        )
+        candidate = self._resolved_candidate(provider, model, base_url, None, scope)
         if not candidate.model:
             raise ValueError("model must not be empty")
         try:
@@ -263,13 +283,24 @@ class RuntimeConfigService:
         if provider is ProviderId.GIGACHAT and not self._certificate.available:
             raise ValueError(f"certificate_{self._certificate.state}")
         secret = one_time_key or await self._secret(provider)
-        return self._resolved_candidate(provider, config.model, config.base_url, secret)
+        return self._resolved_candidate(
+            provider,
+            config.model,
+            config.base_url,
+            secret,
+            config.scope,
+        )
 
     async def client_for(self, record: JobRecord):
         if record.provider is ProviderId.MOCK and not self._development:
             raise ValueError("mock provider is disabled")
         config = await self.resolved_config(
-            LLMClientConfig(record.provider, record.model, base_url=record.base_url)
+            LLMClientConfig(
+                record.provider,
+                record.model,
+                base_url=record.base_url,
+                scope=record.scope,
+            )
         )
         http_client = self._http_for(ProviderId(config.provider))
         if ProviderId(config.provider) is ProviderId.GIGACHAT and http_client is None:
@@ -291,7 +322,12 @@ class RuntimeConfigService:
             )
         try:
             config = await self.resolved_config(
-                LLMClientConfig(payload.provider, payload.model, base_url=payload.base_url),
+                LLMClientConfig(
+                    payload.provider,
+                    payload.model,
+                    base_url=payload.base_url,
+                    scope=payload.scope,
+                ),
                 one_time_key=api_key,
             )
             result = await validate_llm_connection(config, self._http_for(payload.provider))
@@ -309,17 +345,52 @@ class RuntimeConfigService:
             certificate=self._certificate_response() if payload.provider is ProviderId.GIGACHAT else None,
         )
 
-    async def list_models(self, provider: str, base_url: str | None) -> ModelsResponse:
-        provider_id = ProviderId(provider)
+    async def list_models(
+        self,
+        payload: ModelsRequest,
+        *,
+        api_key: str | None,
+    ) -> ModelsResponse:
+        provider_id = ProviderId(payload.provider)
+        if provider_id is ProviderId.GIGACHAT and not self._certificate.available:
+            raise ModelDiscoveryError(422, f"certificate_{self._certificate.state}")
         current = await self._repository.get_config()
         model = current.model if ProviderId(current.provider) is provider_id else (
             RECOMMENDED_MODELS[provider_id][0] if RECOMMENDED_MODELS[provider_id] else "manual"
         )
-        config = await self.resolved_config(LLMClientConfig(provider_id, model, base_url=base_url))
         try:
+            config = await self.resolved_config(
+                LLMClientConfig(
+                    provider_id,
+                    model,
+                    base_url=payload.base_url,
+                    scope=payload.scope,
+                ),
+                one_time_key=api_key,
+            )
             models = await list_llm_models(config, self._http_for(provider_id))
-        except (LLMProviderError, LLMResponseError, httpx.HTTPError, ValueError):
-            raise ServiceUnavailableError() from None
+        except ValueError:
+            code = (
+                "gigachat_credentials_missing"
+                if provider_id is ProviderId.GIGACHAT
+                else "invalid_configuration"
+            )
+            raise ModelDiscoveryError(422, code) from None
+        except LLMHTTPError as exc:
+            code_by_status = {
+                400: "gigachat_scope_mismatch",
+                401: "gigachat_authentication_failed",
+                402: "gigachat_payment_required",
+                403: "gigachat_permission_denied",
+                429: "gigachat_rate_limited",
+            }
+            code = code_by_status.get(exc.status_code, "provider_unavailable")
+            status_code = exc.status_code if exc.status_code in code_by_status else 503
+            raise ModelDiscoveryError(status_code, code) from None
+        except LLMResponseError:
+            raise ModelDiscoveryError(502, "provider_invalid_response") from None
+        except (LLMProviderError, httpx.HTTPError):
+            raise ModelDiscoveryError(503, "provider_unavailable") from None
         return ModelsResponse(
             models=[
                 ModelResponse(
@@ -339,20 +410,20 @@ class RuntimeJobService:
         files: FileStore,
         queue: asyncio.Queue[str | None],
         config: RuntimeConfigService,
+        cancel_events: dict[str, asyncio.Event],
     ) -> None:
         self._repository = repository
         self._files = files
         self._queue = queue
         self._config = config
+        self._cancel_events = cancel_events
 
     async def create_job(
         self,
         *,
         file: UploadFile,
         entity_types,
-        ocr_enabled: bool,
     ) -> JobCreateResponse:
-        del ocr_enabled
         job_id = str(uuid4())
         filename = file.filename or "document"
         document_format = DocumentFormat(filename.rsplit(".", 1)[-1].lower())
@@ -390,6 +461,29 @@ class RuntimeJobService:
             total_replacements=record.total_replacements,
             error=record.error,
         )
+
+    async def cancel_job(self, job_id: str) -> JobStatusResponse:
+        record = await self._require(job_id)
+        if record.status is JobStatus.CANCELLED:
+            return await self.get_job(job_id)
+        if record.status not in {
+            JobStatus.QUEUED,
+            JobStatus.PROCESSING,
+            JobStatus.NEEDS_CLARIFICATION,
+        }:
+            raise JobStateError
+        changed = await self._repository.set_cancelled(job_id)
+        if not changed:
+            current = await self._require(job_id)
+            if current.status is JobStatus.CANCELLED:
+                return await self.get_job(job_id)
+            raise JobStateError
+        event = self._cancel_events.get(job_id)
+        if event is not None:
+            event.set()
+        else:
+            await self._files.delete_job(job_id)
+        return await self.get_job(job_id)
 
     async def submit_answers(
         self,
@@ -506,8 +600,10 @@ async def create_runtime(
         development=settings.env == "development",
     )
     queue: asyncio.Queue[str | None] = asyncio.Queue()
-    job_service = RuntimeJobService(repository, files, queue, config_service)
+    cancel_events: dict[str, asyncio.Event] = {}
+    job_service = RuntimeJobService(repository, files, queue, config_service, cancel_events)
     health_service = RuntimeHealthService(database)
+    ocr_provider = TesseractOcrProvider()
 
     async def worker_loop() -> None:
         while True:
@@ -518,7 +614,19 @@ async def create_runtime(
                 record = await repository.get_job(job_id)
                 if record is None:
                     continue
-                await repository.set_processing(job_id)
+                if record.status is JobStatus.CANCELLED:
+                    await files.delete_job(job_id)
+                    continue
+                if record.status is not JobStatus.QUEUED:
+                    continue
+                cancel_event = asyncio.Event()
+                cancel_events[job_id] = cancel_event
+                if not await repository.set_processing(job_id):
+                    continue
+                def check_cancelled(event: asyncio.Event = cancel_event) -> None:
+                    if event.is_set():
+                        raise PipelineCancelled
+
                 try:
                     client = await config_service.client_for(record)
                     result = await run_pipeline(
@@ -532,9 +640,19 @@ async def create_runtime(
                             if record.pending_matches
                             else None
                         ),
+                        use_ocr=True,
+                        ocr_provider=ocr_provider,
+                        cancel_check=check_cancelled,
                     )
+                except PipelineCancelled:
+                    continue
                 except (ValueError, ServiceUnavailableError):
-                    await repository.set_failed(job_id, "llm_unavailable")
+                    current = await repository.get_job(job_id)
+                    if current is not None and current.status is not JobStatus.CANCELLED:
+                        await repository.set_failed(job_id, "llm_unavailable")
+                    continue
+                current = await repository.get_job(job_id)
+                if current is None or current.status is JobStatus.CANCELLED:
                     continue
                 if result.status is JobStatus.NEEDS_CLARIFICATION:
                     questions = [
@@ -567,10 +685,17 @@ async def create_runtime(
             except Exception:  # noqa: BLE001 - worker must survive a failed job boundary
                 if job_id is not None:
                     try:
-                        await repository.set_failed(job_id, "worker_failed")
+                        current = await repository.get_job(job_id)
+                        if current is not None and current.status is not JobStatus.CANCELLED:
+                            await repository.set_failed(job_id, "worker_failed")
                     except Exception:  # noqa: BLE001 - health exposes a dead persistence layer
                         LOGGER.error("worker_repository_update_failed")
             finally:
+                if job_id is not None:
+                    cancel_events.pop(job_id, None)
+                    current = await repository.get_job(job_id)
+                    if current is not None and current.status is JobStatus.CANCELLED:
+                        await files.delete_job(job_id)
                 queue.task_done()
 
     worker = asyncio.create_task(worker_loop(), name="dockmask-worker")

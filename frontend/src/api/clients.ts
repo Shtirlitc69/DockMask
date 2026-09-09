@@ -10,7 +10,7 @@ import type {
   ConfigValidationRequest,
   ConfigValidationResponse,
   ModelsResponse,
-  ProviderId,
+  ModelsRequest,
   ReportResponse,
 } from "./dto"
 
@@ -98,8 +98,6 @@ export class ApiClient {
     for (const entityType of request.entityTypes)
       form.append("entity_types", entityType)
 
-    form.append("ocr_enabled", String(request.ocrEnabled ?? false))
-
     return this.request("POST", "/jobs", form, signal)
   }
 
@@ -108,6 +106,15 @@ export class ApiClient {
       "GET",
       `/jobs/${encodeURIComponent(jobId)}`,
       undefined,
+      signal,
+    )
+  }
+
+  cancelJob(jobId: string, signal?: AbortSignal): Promise<JobStatusResponse> {
+    return this.request(
+      "POST",
+      `/jobs/${encodeURIComponent(jobId)}/cancel`,
+      JSON.stringify({}),
       signal,
     )
   }
@@ -153,16 +160,13 @@ export class ApiClient {
   }
 
   listModels(
-    provider: ProviderId,
-    baseUrl?: string | null,
+    request: ModelsRequest,
     signal?: AbortSignal,
   ): Promise<ModelsResponse> {
-    const query = new URLSearchParams({ provider })
-    if (baseUrl) query.set("base_url", baseUrl)
     return this.request(
-      "GET",
-      `/config/models?${query.toString()}`,
-      undefined,
+      "POST",
+      "/config/models",
+      JSON.stringify(request),
       signal,
     )
   }

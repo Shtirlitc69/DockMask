@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 from pathlib import Path
 
 from fastapi import UploadFile
@@ -13,14 +14,22 @@ class FileStore:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def job_dir(self, job_id: str) -> Path:
+    def _job_path(self, job_id: str) -> Path:
         if not job_id or any(character not in "0123456789abcdef-" for character in job_id.lower()):
             raise ValueError("invalid job id")
         target = (self.root / job_id).resolve()
         if self.root not in target.parents:
             raise ValueError("invalid job path")
+        return target
+
+    def job_dir(self, job_id: str) -> Path:
+        target = self._job_path(job_id)
         target.mkdir(parents=True, exist_ok=True)
         return target
+
+    async def delete_job(self, job_id: str) -> None:
+        target = self._job_path(job_id)
+        await asyncio.to_thread(shutil.rmtree, target, True)
 
     async def save_upload(self, job_id: str, upload: UploadFile, suffix: str) -> Path:
         target = self.job_dir(job_id) / f"source.{suffix}"

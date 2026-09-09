@@ -1,4 +1,5 @@
 from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from PyInstaller.utils.hooks import collect_data_files
 
@@ -14,6 +15,17 @@ if not certificate.is_file() or not manifest.is_file():
 
 datas = collect_data_files("app.resources.certs")
 datas.append((str(frontend_dist), "frontend/dist"))
+ocr_runtime = project_root / "tmp" / "tesseract"
+if not (ocr_runtime / "tesseract.exe").is_file():
+    raise SystemExit("Tesseract runtime is missing; run scripts/prepare_ocr.ps1 first")
+for required_language in ("rus.traineddata", "eng.traineddata"):
+    if not (ocr_runtime / "tessdata" / required_language).is_file():
+        raise SystemExit(f"Tesseract language is missing: {required_language}")
+ocr_archive = project_root / "tmp" / "dockmask-tesseract-runtime.zip"
+with ZipFile(ocr_archive, "w", compression=ZIP_DEFLATED, compresslevel=9) as archive:
+    for path in sorted(item for item in ocr_runtime.rglob("*") if item.is_file()):
+        archive.write(path, path.relative_to(ocr_runtime).as_posix())
+datas.append((str(ocr_archive), "ocr"))
 
 a = Analysis(
     [str(project_root / "app" / "desktop.py")],

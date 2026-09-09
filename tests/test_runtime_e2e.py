@@ -82,3 +82,37 @@ def test_provider_keys_are_isolated_and_write_only(tmp_path: Path) -> None:
     assert first not in response.text and second not in response.text
     assert first not in fetched.text and second not in fetched.text
     assert secret_store.values == {"openai": first, "anthropic": second}
+
+
+def test_runtime_cancels_clarification_and_removes_job_files(tmp_path: Path) -> None:
+    source = tmp_path / "source.docx"
+    document = Document()
+    document.add_paragraph("ООО Тест")
+    document.save(source)
+    data_dir = tmp_path / "runtime"
+    app = create_app(
+        settings=Settings(data_dir=data_dir, env="development"),
+        secret_store=MemorySecretStore(),
+    )
+
+    with TestClient(app) as client, source.open("rb") as stream:
+        created = client.post(
+            "/api/jobs",
+            files={"file": (source.name, stream)},
+            data={"entity_types": "organization"},
+        )
+        job_id = created.json()["job_id"]
+        for _ in range(100):
+            status = client.get(f"/api/jobs/{job_id}").json()
+            if status["status"] == "needs_clarification":
+                break
+            time.sleep(0.02)
+
+        cancelled = client.post(f"/api/jobs/{job_id}/cancel")
+
+        assert status["status"] == "needs_clarification"
+        assert cancelled.status_code == 200
+        assert cancelled.json()["status"] == "cancelled"
+        assert client.get(f"/api/jobs/{job_id}").json()["status"] == "cancelled"
+        assert client.get(f"/api/jobs/{job_id}/document").status_code == 409
+        assert not (data_dir / "jobs" / job_id).exists()

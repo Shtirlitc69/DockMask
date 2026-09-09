@@ -31,7 +31,7 @@ export function useDocumentPolling(jobId: string | null, revision = 0) {
         )
 
         if (
-          !["done", "failed", "needs_clarification"].includes(
+          !["done", "failed", "cancelled", "needs_clarification"].includes(
             response.status,
           ) &&
           !controller.signal.aborted

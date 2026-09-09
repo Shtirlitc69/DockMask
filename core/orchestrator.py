@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import shutil
 import tempfile
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 
 from core.detectors.entity_detector import detect_all
 from core.detectors.party_identifier import identify_parties
 from core.extractors.docx_extractor import extract_docx
+from core.extractors.ocr.base import OcrProcessingError, OcrProvider, OcrUnavailableError
 from core.extractors.pdf_extractor import extract_pdf
 from core.extractors.xlsx_extractor import extract_xlsx
 from core.models import (
@@ -38,6 +39,15 @@ _REDACTORS = {
     DocumentFormat.XLSX: redact_xlsx,
     DocumentFormat.PDF: redact_pdf,
 }
+
+
+class PipelineCancelled(RuntimeError):
+    """Raised cooperatively when a job has been cancelled."""
+
+
+def _check_cancelled(cancel_check: Callable[[], None] | None) -> None:
+    if cancel_check is not None:
+        cancel_check()
 
 
 def _normalize_entity_types(requested_types: Iterable[EntityType | str]) -> tuple[EntityType, ...]:
@@ -103,6 +113,8 @@ async def run_pipeline(
     answers: Mapping[str, str] | None = None,
     prepared_matches: Iterable[Match] | None = None,
     use_ocr: bool = False,
+    ocr_provider: OcrProvider | None = None,
+    cancel_check: Callable[[], None] | None = None,
 ) -> PipelineResult:
     """Process a DOCX, XLSX or text PDF and atomically publish its outputs."""
 
@@ -123,13 +135,29 @@ async def run_pipeline(
     output_root.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=output_root))
     try:
+        _check_cancelled(cancel_check)
         extracted = await asyncio.to_thread(_EXTRACTORS[document_format], source)
+        _check_cancelled(cancel_check)
         if extracted.is_scanned:
-            code = "ocr_not_available" if use_ocr else "ocr_required"
-            return PipelineResult(status=JobStatus.FAILED, error_message=code)
+            if not use_ocr:
+                return PipelineResult(status=JobStatus.FAILED, error_message="ocr_required")
+            if ocr_provider is None:
+                return PipelineResult(status=JobStatus.FAILED, error_message="ocr_unavailable")
+            for page_number in extracted.ocr_pages:
+                _check_cancelled(cancel_check)
+                page_blocks = await asyncio.to_thread(
+                    ocr_provider.extract_page,
+                    source,
+                    page_number,
+                    cancel_check=cancel_check,
+                )
+                if not page_blocks:
+                    return PipelineResult(status=JobStatus.FAILED, error_message="ocr_no_text")
+                extracted.blocks.extend(page_blocks)
 
         if prepared_matches is None:
             matches_by_block = await detect_all(extracted.blocks, normalized_types, llm_client)
+            _check_cancelled(cancel_check)
             await identify_parties(extracted.blocks, matches_by_block, llm_client)
         else:
             matches_by_block: dict[str, list[Match]] = {}
@@ -151,6 +179,7 @@ async def run_pipeline(
             staged_document,
             matches_by_block,
         )
+        _check_cancelled(cancel_check)
         flat_matches = _flatten_matches(matches_by_block)
         staged_json = staging / f"{source.stem}.report.json"
         staged_xlsx = staging / f"{source.stem}.report.xlsx"
@@ -161,6 +190,7 @@ async def run_pipeline(
             applied_only=True,
         )
         await asyncio.to_thread(generate_report, matches_by_block, staged_xlsx)
+        _check_cancelled(cancel_check)
 
         final_document = output_root / staged_document.name
         final_json = output_root / staged_json.name
@@ -170,6 +200,7 @@ async def run_pipeline(
             (staged_json, final_json),
             (staged_xlsx, final_xlsx),
         ):
+            _check_cancelled(cancel_check)
             staged_path.replace(final_path)
 
         applied = [match for match in flat_matches if match.applied]
@@ -180,6 +211,12 @@ async def run_pipeline(
             xlsx_report=str(final_xlsx),
             matches=applied,
         )
+    except PipelineCancelled:
+        raise
+    except OcrUnavailableError:
+        return PipelineResult(status=JobStatus.FAILED, error_message="ocr_unavailable")
+    except OcrProcessingError:
+        return PipelineResult(status=JobStatus.FAILED, error_message="ocr_failed")
     except Exception:  # noqa: BLE001 - boundary converts every failure to a safe code
         return PipelineResult(status=JobStatus.FAILED, error_message="pipeline_failed")
     finally:
@@ -195,6 +232,8 @@ async def pipeline_run(
     answers: Mapping[str, str] | None = None,
     prepared_matches: Iterable[Match] | None = None,
     use_ocr: bool = False,
+    ocr_provider: OcrProvider | None = None,
+    cancel_check: Callable[[], None] | None = None,
 ) -> PipelineResult:
     return await run_pipeline(
         file_path,
@@ -204,4 +243,6 @@ async def pipeline_run(
         answers=answers,
         prepared_matches=prepared_matches,
         use_ocr=use_ocr,
+        ocr_provider=ocr_provider,
+        cancel_check=cancel_check,
     )

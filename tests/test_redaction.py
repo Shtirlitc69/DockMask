@@ -99,3 +99,29 @@ def test_pdf_removes_original_text_and_adds_replacement(tmp_path: Path) -> None:
     assert "email@example.test" not in text
     assert "[EMAIL_1]" in text
     assert match.applied is True
+
+
+def test_pdf_redacts_ocr_word_coordinates(tmp_path: Path) -> None:
+    source = tmp_path / "scan.pdf"
+    target = tmp_path / "result.pdf"
+    document = fitz.open()
+    document.new_page()
+    document.save(source)
+    document.close()
+    match = _match(
+        "pdf_page_0_ocr_0",
+        "email@example.test",
+        3,
+        Location(
+            page_number=0,
+            bbox=(50, 50, 200, 80),
+            ocr_words=((3, 21, 50, 50, 200, 80),),
+        ),
+    )
+
+    redact_pdf(source, target, {match.block_id: [match]})
+
+    result = fitz.open(target)
+    assert "[EMAIL_1]" in result[0].get_text()
+    result.close()
+    assert match.applied is True

@@ -11,12 +11,12 @@ from llm.mock_client import MockLLMClient
 from llm.ollama_client import OLLAMA_DEFAULT_BASE_URL, OllamaClient
 from llm.openai_client import OpenAIClient
 from llm.openai_compatible_client import OpenAICompatibleClient
-from llm.types import LLMClientConfig, LLMProviderSpec, ProviderId
+from llm.types import GigaChatScope, LLMClientConfig, LLMProviderSpec, ProviderId
 from llm.vllm_client import VLLM_DEFAULT_BASE_URL, VLLMClient
 
 GIGACHAT_BASE_URL = "https://api.giga.chat"
 GIGACHAT_OAUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
-GIGACHAT_DEFAULT_SCOPE = "GIGACHAT_API_PERS"
+GIGACHAT_DEFAULT_SCOPE = GigaChatScope.PERS.value
 
 PROVIDER_SPECS: tuple[LLMProviderSpec, ...] = (
     LLMProviderSpec(

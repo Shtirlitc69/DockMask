@@ -1,4 +1,4 @@
-export type JobStatus = "queued" | "processing" | "needs_clarification" | "done" | "failed"
+export type JobStatus = "queued" | "processing" | "needs_clarification" | "cancelled" | "done" | "failed"
 
 export type EntityType = "person_name" | "organization" | "address" | "amount" | "inn" | "kpp" | "ogrn" | "phone" | "email" | "bank_account" | "bik" | "contract_number"
 
@@ -7,7 +7,6 @@ export interface CreateJobRequest {
 
   entityTypes: EntityType[]
 
-  ocrEnabled?: false
 }
 
 export interface JobCreateResponse {
@@ -63,6 +62,7 @@ export interface ConfigResponse {
   provider: ProviderId
   model: string
   base_url: string | null
+  scope: GigaChatScope | null
   providers: ProviderInfo[]
   certificate: CertificateInfo | null
 }
@@ -72,10 +72,12 @@ export interface ConfigUpdateRequest {
   provider?: ProviderId
   model?: string
   base_url?: string | null
+  scope?: GigaChatScope | null
   clear_api_key?: boolean
 }
 
 export type ProviderId = "mock" | "gigachat" | "openai" | "anthropic" | "openai_compatible" | "ollama" | "vllm"
+export type GigaChatScope = "GIGACHAT_API_PERS" | "GIGACHAT_API_B2B" | "GIGACHAT_API_CORP"
 
 export interface ProviderInfo {
   id: ProviderId
@@ -96,6 +98,14 @@ export interface ConfigValidationRequest {
   provider: ProviderId
   model: string
   base_url?: string | null
+  scope?: GigaChatScope | null
+  api_key?: string
+}
+
+export interface ModelsRequest {
+  provider: ProviderId
+  base_url?: string | null
+  scope?: GigaChatScope | null
   api_key?: string
 }
 

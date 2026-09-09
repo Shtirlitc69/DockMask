@@ -39,6 +39,7 @@ def location_to_dict(location: Location | None) -> dict[str, Any]:
         "cell_coordinate": location.cell_coordinate,
         "page_number": location.page_number,
         "bbox": list(location.bbox) if location.bbox is not None else None,
+        "ocr_words": [list(item) for item in location.ocr_words] if location.ocr_words else None,
     }
 
 

@@ -19,6 +19,14 @@ class ProviderId(StrEnum):
     VLLM = "vllm"
 
 
+class GigaChatScope(StrEnum):
+    """Supported GigaChat API access scopes."""
+
+    PERS = "GIGACHAT_API_PERS"
+    B2B = "GIGACHAT_API_B2B"
+    CORP = "GIGACHAT_API_CORP"
+
+
 @dataclass(frozen=True, slots=True)
 class LLMClientConfig:
     """Resolved values needed to construct one LLM adapter.

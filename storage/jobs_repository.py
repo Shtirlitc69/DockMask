@@ -35,6 +35,7 @@ class JobRecord:
     provider: ProviderId
     model: str
     base_url: str | None
+    scope: str | None
 
 
 class JobsRepository:
@@ -56,8 +57,8 @@ class JobsRepository:
         await connection.execute(
             """INSERT INTO jobs (
                 job_id, status, source_filename, document_format, entity_types,
-                input_path, provider, model, base_url, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                input_path, provider, model, base_url, scope, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 job_id,
                 JobStatus.QUEUED.value,
@@ -68,6 +69,7 @@ class JobsRepository:
                 ProviderId(config.provider).value,
                 config.model,
                 config.base_url,
+                config.scope,
                 now,
                 now,
             ),
@@ -101,6 +103,7 @@ class JobsRepository:
             provider=ProviderId(row["provider"]),
             model=row["model"],
             base_url=row["base_url"],
+            scope=row["scope"],
         )
 
     async def list_queued(self) -> list[str]:
@@ -133,8 +136,15 @@ class JobsRepository:
         await connection.execute(f"UPDATE jobs SET {assignments} WHERE job_id = ?", parameters)
         await connection.commit()
 
-    async def set_processing(self, job_id: str) -> None:
-        await self._update(job_id, status=JobStatus.PROCESSING.value, progress=5, error=None)
+    async def set_processing(self, job_id: str) -> bool:
+        connection = self._database.require_connection()
+        cursor = await connection.execute(
+            """UPDATE jobs SET status = ?, progress = 5, error = NULL, updated_at = ?
+               WHERE job_id = ? AND status = ?""",
+            (JobStatus.PROCESSING.value, _now(), job_id, JobStatus.QUEUED.value),
+        )
+        await connection.commit()
+        return cursor.rowcount == 1
 
     async def set_questions(
         self,
@@ -190,6 +200,24 @@ class JobsRepository:
             pending_matches=[],
         )
 
+    async def set_cancelled(self, job_id: str) -> bool:
+        connection = self._database.require_connection()
+        cursor = await connection.execute(
+            """UPDATE jobs SET status = ?, progress = 100, questions = '[]',
+               pending_matches = '[]', error = NULL, updated_at = ?
+               WHERE job_id = ? AND status IN (?, ?, ?)""",
+            (
+                JobStatus.CANCELLED.value,
+                _now(),
+                job_id,
+                JobStatus.QUEUED.value,
+                JobStatus.PROCESSING.value,
+                JobStatus.NEEDS_CLARIFICATION.value,
+            ),
+        )
+        await connection.commit()
+        return cursor.rowcount == 1
+
     async def recover_interrupted(self) -> int:
         connection = self._database.require_connection()
         cursor = await connection.execute(
@@ -202,22 +230,31 @@ class JobsRepository:
 
     async def get_config(self) -> LLMClientConfig:
         cursor = await self._database.require_connection().execute(
-            "SELECT provider, model, base_url FROM app_config WHERE singleton = 1"
+            "SELECT provider, model, base_url, scope FROM app_config WHERE singleton = 1"
         )
         row = await cursor.fetchone()
         await cursor.close()
         if row is None:
             return LLMClientConfig(ProviderId.MOCK, "mock")
-        return LLMClientConfig(row["provider"], row["model"], base_url=row["base_url"])
+        return LLMClientConfig(
+            row["provider"], row["model"], base_url=row["base_url"], scope=row["scope"]
+        )
 
     async def set_config(self, config: LLMClientConfig) -> None:
         connection = self._database.require_connection()
         await connection.execute(
-            """INSERT INTO app_config(singleton, provider, model, base_url, updated_at)
-               VALUES (1, ?, ?, ?, ?)
+            """INSERT INTO app_config(singleton, provider, model, base_url, scope, updated_at)
+               VALUES (1, ?, ?, ?, ?, ?)
                ON CONFLICT(singleton) DO UPDATE SET
                  provider=excluded.provider, model=excluded.model,
-                 base_url=excluded.base_url, updated_at=excluded.updated_at""",
-            (ProviderId(config.provider).value, config.model, config.base_url, _now()),
+                 base_url=excluded.base_url, scope=excluded.scope,
+                 updated_at=excluded.updated_at""",
+            (
+                ProviderId(config.provider).value,
+                config.model,
+                config.base_url,
+                config.scope,
+                _now(),
+            ),
         )
         await connection.commit()

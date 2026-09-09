@@ -49,6 +49,14 @@ export function mapBackendStatusToUi(
         isError: false,
       }
 
+    case "cancelled":
+      return {
+        uiState: "idle",
+        progress: 100,
+        label: "Обработка отменена",
+        isError: false,
+      }
+
     case "failed":
       return {
         uiState: "error",

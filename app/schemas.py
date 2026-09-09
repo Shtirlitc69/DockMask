@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from core.models import DocumentFormat, EntityType, JobStatus
-from llm.types import ProviderId
+from llm.types import GigaChatScope, ProviderId
 
 
 class QuestionResponse(BaseModel):
@@ -66,6 +66,7 @@ class ConfigResponse(BaseModel):
     provider: ProviderId = ProviderId.MOCK
     model: str = "mock"
     base_url: str | None = None
+    scope: GigaChatScope | None = None
     providers: list[ProviderResponse] = Field(default_factory=list)
     certificate: CertificateResponse | None = None
 
@@ -77,6 +78,7 @@ class ConfigUpdateRequest(BaseModel):
     provider: ProviderId | None = None
     model: str | None = Field(default=None, min_length=1, max_length=200)
     base_url: str | None = Field(default=None, max_length=2048)
+    scope: GigaChatScope | None = None
     clear_api_key: bool = False
 
 
@@ -86,6 +88,7 @@ class ConfigValidationRequest(BaseModel):
     provider: ProviderId
     model: str = Field(min_length=1, max_length=200)
     base_url: str | None = Field(default=None, max_length=2048)
+    scope: GigaChatScope | None = None
     api_key: SecretStr | None = None
 
 
@@ -121,6 +124,15 @@ class ModelsResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     models: list[ModelResponse] = Field(default_factory=list)
+
+
+class ModelsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: ProviderId
+    base_url: str | None = Field(default=None, max_length=2048)
+    scope: GigaChatScope | None = None
+    api_key: SecretStr | None = None
 
 
 class ModelResponse(BaseModel):

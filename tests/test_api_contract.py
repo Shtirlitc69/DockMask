@@ -25,7 +25,6 @@ from core.models import DocumentFormat, EntityType, JobStatus
 class FakeJobService:
     jobs: dict[str, JobStatusResponse] = field(default_factory=dict)
     received_types: tuple[EntityType, ...] = ()
-    received_ocr: bool | None = None
     received_content: bytes = b""
 
     async def create_job(
@@ -33,10 +32,8 @@ class FakeJobService:
         *,
         file: UploadFile,
         entity_types: tuple[EntityType, ...],
-        ocr_enabled: bool,
     ) -> JobCreateResponse:
         self.received_types = entity_types
-        self.received_ocr = ocr_enabled
         self.received_content = await file.read()
         suffix = (file.filename or "").rsplit(".", 1)[-1].lower()
         job_id = "job-1"
@@ -60,6 +57,12 @@ class FakeJobService:
         except KeyError:
             raise JobNotFoundError from None
 
+    async def cancel_job(self, job_id: str) -> JobStatusResponse:
+        job = await self.get_job(job_id)
+        cancelled = job.model_copy(update={"status": JobStatus.CANCELLED, "progress": 100})
+        self.jobs[job_id] = cancelled
+        return cancelled
+
     async def submit_answers(
         self,
         job_id: str,
@@ -80,7 +83,7 @@ class FakeConfigService:
 
     async def get_config(self) -> ConfigResponse:
         return ConfigResponse(
-            feature_flags={"ocr_enabled": False},
+            feature_flags={"ocr_enabled": True},
             has_api_key=self.stored_api_key is not None,
         )
 
@@ -129,7 +132,6 @@ def test_create_job_accepts_supported_formats(extension: str) -> None:
         "document_format": extension,
     }
     assert jobs.received_types == (EntityType.INN, EntityType.PHONE)
-    assert jobs.received_ocr is False
     assert jobs.received_content == b"document"
 
 
@@ -142,11 +144,6 @@ def test_create_job_accepts_supported_formats(extension: str) -> None:
         ({"file": ("document.docx", b"")}, {"entity_types": "inn"}, "empty_file"),
         ({"file": ("document.docx", b"document")}, {}, "entity_types_required"),
         ({"file": ("document.docx", b"document")}, {"entity_types": "unknown"}, "invalid_entity_type"),
-        (
-            {"file": ("document.docx", b"document")},
-            {"entity_types": "inn", "ocr_enabled": "true"},
-            "ocr_not_available",
-        ),
     ],
 )
 def test_create_job_returns_safe_validation_codes(
@@ -194,6 +191,21 @@ def test_job_status_and_not_found() -> None:
     assert missing.json() == {"detail": "job_not_found"}
 
 
+def test_job_can_be_cancelled_and_cancel_is_idempotent() -> None:
+    client, _, _ = _client()
+    client.post(
+        "/api/jobs",
+        files={"file": ("document.docx", b"document")},
+        data={"entity_types": "inn"},
+    )
+
+    first = client.post("/api/jobs/job-1/cancel")
+    second = client.post("/api/jobs/job-1/cancel")
+
+    assert first.status_code == second.status_code == 200
+    assert first.json()["status"] == second.json()["status"] == "cancelled"
+
+
 def test_existing_answers_route_uses_injected_service() -> None:
     client, _, _ = _client()
     client.post(
@@ -223,7 +235,7 @@ def test_config_key_is_write_only(caplog: pytest.LogCaptureFixture) -> None:
 
     assert updated.status_code == 200
     assert fetched.status_code == 200
-    assert updated.json()["feature_flags"] == {"ocr_enabled": False}
+    assert updated.json()["feature_flags"] == {"ocr_enabled": True}
     assert updated.json()["has_api_key"] is True
     assert fetched.json() == updated.json()
     assert secret not in updated.text

@@ -23,6 +23,7 @@ from app.schemas import (
     HealthResponse,
     JobCreateResponse,
     JobStatusResponse,
+    ModelsRequest,
     ModelsResponse,
     ReportResponse,
 )
@@ -46,16 +47,26 @@ class JobStateError(RuntimeError):
     """The requested result is not available in the current job state."""
 
 
+class ModelDiscoveryError(RuntimeError):
+    """Safe model-discovery failure exposed by the local API."""
+
+    def __init__(self, status_code: int, code: str) -> None:
+        self.status_code = status_code
+        self.code = code
+        super().__init__(code)
+
+
 class JobService(Protocol):
     async def create_job(
         self,
         *,
         file: UploadFile,
         entity_types: tuple[EntityType, ...],
-        ocr_enabled: bool,
     ) -> JobCreateResponse: ...
 
     async def get_job(self, job_id: str) -> JobStatusResponse: ...
+
+    async def cancel_job(self, job_id: str) -> JobStatusResponse: ...
 
     async def submit_answers(
         self,
@@ -85,7 +96,7 @@ class ConfigService(Protocol):
         api_key: str | None,
     ) -> ConfigValidationResponse: ...
 
-    async def list_models(self, provider: str, base_url: str | None) -> ModelsResponse: ...
+    async def list_models(self, payload: ModelsRequest, *, api_key: str | None) -> ModelsResponse: ...
 
 
 class HealthService(Protocol):
@@ -98,12 +109,15 @@ class UnavailableJobService:
         *,
         file: UploadFile,
         entity_types: tuple[EntityType, ...],
-        ocr_enabled: bool,
     ) -> JobCreateResponse:
-        del file, entity_types, ocr_enabled
+        del file, entity_types
         raise ServiceUnavailableError()
 
     async def get_job(self, job_id: str) -> JobStatusResponse:
+        del job_id
+        raise ServiceUnavailableError()
+
+    async def cancel_job(self, job_id: str) -> JobStatusResponse:
         del job_id
         raise ServiceUnavailableError()
 
@@ -126,7 +140,7 @@ class UnavailableJobService:
 
 class UnavailableConfigService:
     async def get_config(self) -> ConfigResponse:
-        return ConfigResponse(feature_flags={"ocr_enabled": False}, has_api_key=False)
+        return ConfigResponse(feature_flags={"ocr_enabled": True}, has_api_key=False)
 
     async def update_config(
         self,
@@ -148,8 +162,8 @@ class UnavailableConfigService:
         del payload, api_key
         raise ServiceUnavailableError()
 
-    async def list_models(self, provider: str, base_url: str | None) -> ModelsResponse:
-        del provider, base_url
+    async def list_models(self, payload: ModelsRequest, *, api_key: str | None) -> ModelsResponse:
+        del payload, api_key
         raise ServiceUnavailableError()
 
 

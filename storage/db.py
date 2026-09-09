@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     provider TEXT NOT NULL,
     model TEXT NOT NULL,
     base_url TEXT,
+    scope TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -34,6 +35,7 @@ CREATE TABLE IF NOT EXISTS app_config (
     provider TEXT NOT NULL,
     model TEXT NOT NULL,
     base_url TEXT,
+    scope TEXT,
     updated_at TEXT NOT NULL
 );
 """
@@ -59,6 +61,14 @@ class Database:
             await connection.execute(
                 "ALTER TABLE jobs ADD COLUMN pending_matches TEXT NOT NULL DEFAULT '[]'"
             )
+        if "scope" not in columns:
+            await connection.execute("ALTER TABLE jobs ADD COLUMN scope TEXT")
+        config_columns = {
+            row[1]
+            for row in await (await connection.execute("PRAGMA table_info(app_config)")).fetchall()
+        }
+        if "scope" not in config_columns:
+            await connection.execute("ALTER TABLE app_config ADD COLUMN scope TEXT")
         await connection.commit()
         self.connection = connection
         return connection

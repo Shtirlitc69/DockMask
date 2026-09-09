@@ -30,6 +30,29 @@ def redact_pdf(
                 if location.page_number is None or location.page_number >= document.page_count:
                     continue
                 page = document[location.page_number]
+                if location.ocr_words:
+                    word_rects = [
+                        fitz.Rect(word[2:])
+                        for word in location.ocr_words
+                        if word[0] < match.end and word[1] > match.start
+                    ]
+                    if not word_rects:
+                        continue
+                    candidate = word_rects[0]
+                    for word_rect in word_rects[1:]:
+                        candidate |= word_rect
+                    page.add_redact_annot(
+                        candidate,
+                        text=match.replacement,
+                        fontname="helv",
+                        fontsize=8,
+                        fill=(1, 1, 0.55),
+                        text_color=(0, 0, 0),
+                        cross_out=False,
+                    )
+                    touched_pages.add(location.page_number)
+                    match.applied = True
+                    continue
                 candidates = page.search_for(match.text)
                 if location.bbox is not None:
                     block_rect = fitz.Rect(location.bbox)

@@ -7,6 +7,7 @@ from docx import Document
 from openpyxl import Workbook
 
 from core.extractors.docx_extractor import extract_docx
+from core.extractors.ocr.tesseract_provider import TesseractOcrProvider
 from core.extractors.pdf_extractor import extract_pdf
 from core.extractors.xlsx_extractor import extract_xlsx
 from core.models import BlockKind, DocumentFormat
@@ -64,3 +65,42 @@ def test_pdf_marks_image_only_document_as_scanned(tmp_path: Path) -> None:
     assert any("email@example.test" in block.text for block in text.blocks)
     assert text.is_scanned is False
     assert scanned.is_scanned is True
+    assert scanned.ocr_pages == (0,)
+
+
+def test_pdf_marks_only_image_pages_for_ocr(tmp_path: Path) -> None:
+    path = tmp_path / "mixed.pdf"
+    document = fitz.open()
+    document.new_page().insert_text((72, 72), "native text")
+    document.new_page()
+    document.save(path)
+    document.close()
+
+    extracted = extract_pdf(path)
+
+    assert extracted.is_scanned is True
+    assert extracted.ocr_pages == (1,)
+    assert len(extracted.blocks) == 1
+
+
+def test_tesseract_tsv_preserves_word_character_coordinates() -> None:
+    tsv = (
+        "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n"
+        "5\t1\t1\t1\t1\t1\t10\t20\t30\t10\t95\tИванов\n"
+        "5\t1\t1\t1\t1\t2\t45\t20\t20\t10\t93\tИ.И.\n"
+    )
+
+    blocks = TesseractOcrProvider._parse_tsv(
+        tsv,
+        2,
+        image_width=100,
+        image_height=100,
+        page_width=200,
+        page_height=200,
+    )
+
+    assert [block.text for block in blocks] == ["Иванов И.И."]
+    assert blocks[0].location.ocr_words == (
+        (0, 6, 20.0, 40.0, 80.0, 60.0),
+        (7, 11, 90.0, 40.0, 130.0, 60.0),
+    )

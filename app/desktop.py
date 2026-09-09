@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import socket
+import ssl
+import sys
 import threading
 import time
 from urllib.error import URLError
@@ -12,6 +14,7 @@ import uvicorn
 
 from app.main import create_app
 from core.config import Settings
+from core.extractors.ocr.tesseract_provider import TesseractOcrProvider
 
 
 def _wait_until_ready(url: str, timeout_seconds: float = 20) -> None:
@@ -56,5 +59,14 @@ def main() -> None:
         listener.close()
 
 
+def _self_test() -> int:
+    ssl.create_default_context()
+    provider = TesseractOcrProvider()
+    provider.check_runtime()
+    return 0
+
+
 if __name__ == "__main__":
+    if "--self-test" in sys.argv[1:]:
+        raise SystemExit(_self_test())
     main()
