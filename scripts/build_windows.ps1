@@ -44,8 +44,15 @@ uv run pyinstaller --noconfirm --clean --distpath output/exe --workpath tmp/pyin
 Assert-LastExitCode "PyInstaller build"
 
 $executable = Resolve-Path "output/exe/DockMask.exe"
-& $executable --self-test
-Assert-LastExitCode "Packaged application self-test"
+$selfTest = Start-Process `
+    -FilePath $executable.Path `
+    -ArgumentList "--self-test" `
+    -WindowStyle Hidden `
+    -Wait `
+    -PassThru
+if ($selfTest.ExitCode -ne 0) {
+    throw "Packaged application self-test failed with exit code $($selfTest.ExitCode)"
+}
 $distributionFiles = @(Get-ChildItem "output/exe" -Recurse -File)
 if ($distributionFiles.Count -ne 1 -or $distributionFiles[0].FullName -ne $executable.Path) {
     throw "Distribution must contain only DockMask.exe"

@@ -25,6 +25,8 @@ app/static/js/*
 # Local working dirs (build/test artifacts)
 .artifact_work/
 .pytest_tmp/
+build/
+dist/
 !storage/files/.gitkeep
 app/static/css/*
 !app/static/css/.gitkeep

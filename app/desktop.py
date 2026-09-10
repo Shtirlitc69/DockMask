@@ -10,6 +10,7 @@ import ssl
 import sys
 import threading
 import time
+from html import escape
 from pathlib import Path, PurePath
 from typing import Any, ClassVar
 from urllib.error import URLError
@@ -17,9 +18,9 @@ from urllib.request import urlopen
 from uuid import UUID, uuid4
 
 import uvicorn
+from platformdirs import user_data_path
 
 from app.logging_config import configure_file_logging
-from app.main import create_app
 from core.config import Settings
 from core.extractors.ocr.tesseract_provider import TesseractOcrProvider
 
@@ -29,6 +30,8 @@ LOGGER = logging.getLogger("dockmask.desktop")
 # plus the uvicorn lifespan wiring database, keyring and OCR) routinely exceed
 # the previous 20 second budget on slower machines.
 API_READY_TIMEOUT_SECONDS = 60.0
+API_READY_INITIAL_DELAY_SECONDS = 0.1
+API_READY_MAX_DELAY_SECONDS = 0.5
 
 LOADING_HTML = """<!DOCTYPE html>
 <html lang="ru">
@@ -72,12 +75,26 @@ ERROR_HTML_TEMPLATE = """<!DOCTYPE html>
 <body>
   <div class="card">
     <h1>Не удалось запустить локальный сервер</h1>
-    <p>Проверьте, что приложение не блокируется антивирусом, и повторите запуск.</p>
+    <p>{message}</p>
     <p>Подробности в журнале:<br><code>{log_file}</code></p>
   </div>
 </body>
 </html>
 """
+
+STARTUP_ERROR_MESSAGES = {
+    "backend_failed": "Локальный сервер завершился во время запуска. Повторите запуск приложения.",
+    "startup_timeout": "Запуск занял слишком много времени. Повторите попытку после перезагрузки Windows.",
+    "ui_load_failed": "Сервер запущен, но интерфейс приложения не удалось открыть.",
+}
+
+
+class StartupError(RuntimeError):
+    """A user-visible desktop startup failure with a stable machine code."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
 
 
 class DesktopApi:
@@ -91,7 +108,13 @@ class DesktopApi:
 
     def __init__(self, base_url: str) -> None:
         self._base_url = base_url.rstrip("/")
-        self.window = None
+        # pywebview recursively exposes every public js_api attribute. Keeping
+        # its native Window private prevents traversal into WinForms/WebView2
+        # COM objects from the bridge worker thread.
+        self._window: Any | None = None
+
+    def _bind_window(self, window: Any) -> None:
+        self._window = window
 
     def save_artifact(
         self,
@@ -110,13 +133,13 @@ class DesktopApi:
         allowed_suffixes = {".pdf", ".docx", ".xlsx"} if kind == "document" else {
             self._REPORT_EXTENSIONS[kind]
         }
-        if not safe_name or suffix not in allowed_suffixes or self.window is None:
+        if not safe_name or suffix not in allowed_suffixes or self._window is None:
             return {"status": "error", "code": "invalid_filename"}
 
         from webview import FileDialog
 
         label = suffix.removeprefix(".").upper()
-        selected = self.window.create_file_dialog(
+        selected = self._window.create_file_dialog(
             FileDialog.SAVE,
             save_filename=safe_name,
             file_types=(f"{label} (*{suffix})",),
@@ -147,21 +170,44 @@ class DesktopApi:
         return {"status": "saved", "filename": target.name}
 
 
-def _wait_until_ready(url: str, timeout_seconds: float = API_READY_TIMEOUT_SECONDS) -> None:
+def _wait_until_ready(
+    url: str,
+    backend_thread: threading.Thread | None = None,
+    timeout_seconds: float = API_READY_TIMEOUT_SECONDS,
+) -> None:
     deadline = time.monotonic() + timeout_seconds
+    delay = API_READY_INITIAL_DELAY_SECONDS
     while time.monotonic() < deadline:
+        if backend_thread is not None and not backend_thread.is_alive():
+            raise StartupError("backend_failed")
         try:
             with urlopen(f"{url}/api/health", timeout=1) as response:
                 if response.status == 200:
                     return
         except (OSError, URLError):
-            time.sleep(0.1)
-    raise RuntimeError("local_api_start_failed")
+            pass
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(delay, remaining))
+            delay = min(delay * 1.5, API_READY_MAX_DELAY_SECONDS)
+    if backend_thread is not None and not backend_thread.is_alive():
+        raise StartupError("backend_failed")
+    raise StartupError("startup_timeout")
 
 
-def _error_html(log_file: Path | None) -> str:
-    location = str(log_file) if log_file is not None else "журнал недоступен"
-    return ERROR_HTML_TEMPLATE.replace("{log_file}", location)
+def _error_html(log_file: Path | None, code: str) -> str:
+    location = escape(str(log_file) if log_file is not None else "журнал недоступен")
+    message = escape(STARTUP_ERROR_MESSAGES.get(code, STARTUP_ERROR_MESSAGES["backend_failed"]))
+    return ERROR_HTML_TEMPLATE.replace("{message}", message).replace("{log_file}", location)
+
+
+def _configure_startup_logging() -> Path | None:
+    """Create a fallback log before environment-backed settings are validated."""
+    fallback_logs = user_data_path("DockMask", "Triema", ensure_exists=False) / "logs"
+    try:
+        return configure_file_logging(fallback_logs)
+    except OSError:
+        return None
 
 
 def _message_box(title: str, text: str) -> None:
@@ -173,76 +219,120 @@ def _message_box(title: str, text: str) -> None:
         LOGGER.exception("desktop_startup stage=message_box_failed")
 
 
-def _activate(window: Any, url: str, started: float, log_file: Path | None) -> None:
+def _show_startup_error(window: Any, log_file: Path | None, code: str) -> None:
+    try:
+        window.load_html(_error_html(log_file, code))
+    except Exception:
+        LOGGER.exception("desktop_startup stage=error_page_failed code=%s", code)
+
+
+def _activate(
+    window: Any,
+    url: str,
+    started: float,
+    log_file: Path | None,
+    backend_thread: threading.Thread,
+    server: uvicorn.Server,
+) -> None:
     """Wait for the API in a pywebview worker thread, then swap in the UI."""
     try:
-        _wait_until_ready(url)
-    except RuntimeError:
+        _wait_until_ready(url, backend_thread)
+    except StartupError as error:
         LOGGER.error(
-            "desktop_startup stage=api_start_failed seconds=%.3f",
+            "desktop_startup stage=%s seconds=%.3f",
+            error.code,
             time.monotonic() - started,
         )
-        window.load_html(_error_html(log_file))
+        server.should_exit = True
+        _show_startup_error(window, log_file, error.code)
         return
     LOGGER.info("desktop_startup stage=api_ready seconds=%.3f", time.monotonic() - started)
-    window.load_url(url)
+    try:
+        window.load_url(url)
+    except Exception:
+        LOGGER.exception(
+            "desktop_startup stage=ui_load_failed seconds=%.3f",
+            time.monotonic() - started,
+        )
+        server.should_exit = True
+        _show_startup_error(window, log_file, "ui_load_failed")
+
+
+def _run_server(server: uvicorn.Server, listener: socket.socket) -> None:
+    try:
+        server.run(sockets=[listener])
+    except BaseException:
+        LOGGER.exception("desktop_startup stage=backend_crashed")
 
 
 def main() -> None:
     started = time.monotonic()
+    log_file = _configure_startup_logging()
     settings = Settings(env="production")
-    # File logging must exist before anything else can fail; the uvicorn
-    # lifespan only configures it after the API is already serving.
-    try:
-        log_file = configure_file_logging(settings.logs_path)
-    except OSError:
-        log_file = None
-        LOGGER.exception("desktop_startup stage=file_logging_unavailable")
+    if log_file is None or log_file.parent != settings.logs_path:
+        try:
+            log_file = configure_file_logging(settings.logs_path)
+        except OSError:
+            LOGGER.exception("desktop_startup stage=file_logging_unavailable")
     LOGGER.info("desktop_startup stage=boot seconds=%.3f", time.monotonic() - started)
     import webview
 
-    application = create_app(settings=settings)
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(("127.0.0.1", 0))
-    listener.listen()
-    port = listener.getsockname()[1]
-    url = f"http://127.0.0.1:{port}"
-    server = uvicorn.Server(
-        uvicorn.Config(application, host="127.0.0.1", port=port, log_level="info")
-    )
-    thread = threading.Thread(
-        target=server.run,
-        kwargs={"sockets": [listener]},
-        name="dockmask-api",
-        daemon=True,
-    )
-    thread.start()
-    LOGGER.info("desktop_startup stage=api_thread seconds=%.3f", time.monotonic() - started)
+    from app.main import create_app
 
-    # The window is shown immediately with a loading page so that the OS keeps
-    # pumping messages and the user gets visual feedback while the backend and
-    # the frozen runtime warm up.
-    desktop_api = DesktopApi(url)
-    window = webview.create_window(
-        "DockMask",
-        html=LOADING_HTML,
-        js_api=desktop_api,
-        width=1280,
-        height=820,
-        min_size=(900, 640),
-    )
-    desktop_api.window = window
-    window.events.loaded += lambda: LOGGER.info(
-        "desktop_startup stage=window_loaded seconds=%.3f", time.monotonic() - started
-    )
-    LOGGER.info("desktop_startup stage=window_created seconds=%.3f", time.monotonic() - started)
+    listener: socket.socket | None = None
+    server: uvicorn.Server | None = None
+    thread: threading.Thread | None = None
     try:
-        webview.start(_activate, args=(window, url, started, log_file))
+        application = create_app(settings=settings)
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        url = f"http://127.0.0.1:{port}"
+        server = uvicorn.Server(
+            uvicorn.Config(application, host="127.0.0.1", port=port, log_level="info")
+        )
+        thread = threading.Thread(
+            target=_run_server,
+            args=(server, listener),
+            name="dockmask-api",
+            daemon=True,
+        )
+        thread.start()
+        LOGGER.info("desktop_startup stage=api_thread seconds=%.3f", time.monotonic() - started)
+
+        # Show the window immediately so Windows can pump messages while the
+        # frozen runtime and backend finish warming up.
+        desktop_api = DesktopApi(url)
+        window = webview.create_window(
+            "DockMask",
+            html=LOADING_HTML,
+            js_api=desktop_api,
+            width=1280,
+            height=820,
+            min_size=(900, 640),
+        )
+        desktop_api._bind_window(window)
+        window.events.loaded += lambda: LOGGER.info(
+            "desktop_startup stage=window_loaded seconds=%.3f", time.monotonic() - started
+        )
+        LOGGER.info(
+            "desktop_startup stage=window_created seconds=%.3f", time.monotonic() - started
+        )
+        webview.start(
+            _activate,
+            args=(window, url, started, log_file, thread, server),
+        )
     finally:
-        server.should_exit = True
-        thread.join(timeout=10)
-        listener.close()
+        if server is not None:
+            server.should_exit = True
+        if thread is not None:
+            thread.join(timeout=10)
+            if thread.is_alive():
+                LOGGER.warning("desktop_shutdown stage=backend_join_timeout")
+        if listener is not None:
+            listener.close()
 
 
 def _self_test() -> int:
@@ -252,9 +342,7 @@ def _self_test() -> int:
     return 0
 
 
-if __name__ == "__main__":
-    if "--self-test" in sys.argv[1:]:
-        raise SystemExit(_self_test())
+def _run_desktop() -> int:
     try:
         main()
     except Exception:
@@ -264,4 +352,11 @@ if __name__ == "__main__":
             "Приложению не удалось запуститься. Подробности — в журнале "
             "dockmask.log внутри папки данных DockMask.",
         )
-        raise
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    if "--self-test" in sys.argv[1:]:
+        raise SystemExit(_self_test())
+    raise SystemExit(_run_desktop())
