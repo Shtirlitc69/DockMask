@@ -17,6 +17,7 @@ from core.models import (
     TextBlock,
 )
 from llm.base import BaseLLMClient
+from llm.http_utils import LLMContextLimitError
 
 ALL_RULE_TYPES = [
     EntityType.INN,
@@ -242,6 +243,53 @@ class ConcurrencyLLMClient(StubLLMClient):
             self.active_calls -= 1
 
 
+class AdaptiveBatchLLMClient(StubLLMClient):
+    batch_max_chars = 2_400
+    batch_max_concurrency = 1
+    provides_inline_roles = True
+
+    def __init__(self, target: str) -> None:
+        super().__init__()
+        self.target = target
+        self.batch_calls = 0
+        self.active_calls = 0
+        self.max_active_calls = 0
+
+    async def find_entities_in_blocks(
+        self,
+        blocks: Sequence[TextBlock],
+        types: Sequence[EntityType],
+    ) -> dict[str, list[EntitySpan]]:
+        del types
+        self.batch_calls += 1
+        self.active_calls += 1
+        self.max_active_calls = max(self.max_active_calls, self.active_calls)
+        try:
+            if sum(len(block.text) for block in blocks) > 2_200:
+                raise LLMContextLimitError("context limit")
+            result: dict[str, list[EntitySpan]] = {}
+            for block in blocks:
+                start = block.text.find(self.target)
+                result[block.block_id] = (
+                    [
+                        EntitySpan(
+                            EntityType.ORGANIZATION,
+                            self.target,
+                            start,
+                            start + len(self.target),
+                            source="adaptive-test",
+                            confidence=0.9,
+                            party_role=PartyRole.SUPPLIER,
+                        )
+                    ]
+                    if start >= 0
+                    else []
+                )
+            return result
+        finally:
+            self.active_calls -= 1
+
+
 class EntityDetectorTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def block(block_id: str, text: str) -> TextBlock:
@@ -430,11 +478,11 @@ class EntityDetectorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [match.replacement for match in result["p:0"]],
-            ["[ORGANIZATION_1]", "[ORGANIZATION_2]"],
+            ["[ОРГАНИЗАЦИЯ_1]", "[ОРГАНИЗАЦИЯ_2]"],
         )
         self.assertEqual(
             [match.replacement for match in result["p:1"]],
-            ["[PERSON_NAME_1]", "[ORGANIZATION_1]"],
+            ["[ФИО_1]", "[ОРГАНИЗАЦИЯ_1]"],
         )
 
     async def test_llm_is_not_called_for_rule_only_or_empty_blocks(self) -> None:
@@ -507,6 +555,28 @@ class EntityDetectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(client.calls), len(blocks))
         self.assertEqual(client.max_active_calls, LLM_MAX_CONCURRENCY)
         self.assertTrue(all(result[block.block_id] == [] for block in blocks))
+
+    async def test_context_overflow_splits_with_offsets_and_deduplicates_overlap(
+        self,
+    ) -> None:
+        target = "ООО Граница"
+        text = "А" * 2_395 + target + "Б" * 2_600
+        client = AdaptiveBatchLLMClient(target)
+
+        result = await detect_all(
+            [self.block("p:0", text)],
+            [EntityType.ORGANIZATION],
+            client,
+        )
+
+        self.assertGreater(client.batch_calls, 1)
+        self.assertLessEqual(client.batch_calls, 64)
+        self.assertEqual(client.max_active_calls, 1)
+        self.assertEqual(len(result["p:0"]), 1)
+        match = result["p:0"][0]
+        self.assertEqual(match.start, 2_395)
+        self.assertEqual(match.text, target)
+        self.assertEqual(match.party_role, PartyRole.SUPPLIER)
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ from app.schemas import (
     JobStatusResponse,
     ModelsRequest,
     ModelsResponse,
+    PreviewResponse,
     ReportResponse,
 )
 from core.models import EntityType
@@ -45,6 +46,10 @@ class JobNotFoundError(LookupError):
 
 class JobStateError(RuntimeError):
     """The requested result is not available in the current job state."""
+
+
+class PreviewUnavailableError(RuntimeError):
+    """The completed artifact cannot be converted to a preview."""
 
 
 class ModelDiscoveryError(RuntimeError):
@@ -77,6 +82,8 @@ class JobService(Protocol):
     async def get_artifact(self, job_id: str, kind: str) -> DownloadArtifact: ...
 
     async def get_report(self, job_id: str) -> ReportResponse: ...
+
+    async def get_preview(self, job_id: str) -> PreviewResponse: ...
 
 
 class ConfigService(Protocol):
@@ -134,6 +141,10 @@ class UnavailableJobService:
         raise ServiceUnavailableError()
 
     async def get_report(self, job_id: str) -> ReportResponse:
+        del job_id
+        raise ServiceUnavailableError()
+
+    async def get_preview(self, job_id: str) -> PreviewResponse:
         del job_id
         raise ServiceUnavailableError()
 

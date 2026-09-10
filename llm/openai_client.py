@@ -13,6 +13,8 @@ class OpenAIClient(OpenAICompatibleClient):
     """OpenAI client with a fixed official API endpoint."""
 
     source = "openai"
+    provider_name = "openai"
+    batch_max_chars = 120_000
 
     def __init__(
         self,

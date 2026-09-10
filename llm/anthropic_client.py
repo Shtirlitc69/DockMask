@@ -30,6 +30,8 @@ class AnthropicClient(StructuredLLMClient):
     """Use the Anthropic Messages API and structured output format."""
 
     source = "anthropic"
+    provider_name = "anthropic"
+    batch_max_chars = 120_000
 
     def __init__(
         self,
@@ -67,7 +69,7 @@ class AnthropicClient(StructuredLLMClient):
     ) -> str:
         payload = {
             "model": self._model,
-            "max_tokens": 1024,
+            "max_tokens": 8192,
             "messages": [{"role": "user", "content": prompt}],
             "output_config": {
                 "format": {

@@ -12,19 +12,25 @@ export function useDocumentPolling(jobId: string | null, revision = 0) {
   const [error, setError] = useState<string | null>(null)
 
   const abortControllerRef = useRef<AbortController | null>(null)
+  const timeoutRef = useRef<number | undefined>(undefined)
 
   useEffect(() => {
-    if (!jobId) return
+    if (!jobId) {
+      setMappedStatus(null)
+      setJob(null)
+      setError(null)
+      return
+    }
 
     const controller = new AbortController()
 
     abortControllerRef.current = controller
 
-    let timeoutId: number | undefined
-
     const poll = async () => {
+      if (controller.signal.aborted) return
       try {
         const response = await apiClient.getJob(jobId, controller.signal)
+        if (controller.signal.aborted) return
         setJob(response)
         setMappedStatus(
           mapBackendStatusToUi(response.status, response.progress),
@@ -36,9 +42,10 @@ export function useDocumentPolling(jobId: string | null, revision = 0) {
           ) &&
           !controller.signal.aborted
         ) {
-          timeoutId = window.setTimeout(poll, POLL_INTERVAL_MS)
+          timeoutRef.current = window.setTimeout(poll, POLL_INTERVAL_MS)
         }
       } catch (reason) {
+        if (controller.signal.aborted) return
         if (reason instanceof DOMException && reason.name === "AbortError")
           return
 
@@ -51,7 +58,7 @@ export function useDocumentPolling(jobId: string | null, revision = 0) {
     return () => {
       controller.abort()
 
-      if (timeoutId !== undefined) clearTimeout(timeoutId)
+      clearTimeout(timeoutRef.current)
     }
   }, [jobId, revision])
 
@@ -59,6 +66,9 @@ export function useDocumentPolling(jobId: string | null, revision = 0) {
     job,
     mappedStatus,
     error,
-    stopPolling: () => abortControllerRef.current?.abort(),
+    stopPolling: () => {
+      abortControllerRef.current?.abort()
+      clearTimeout(timeoutRef.current)
+    },
   }
 }

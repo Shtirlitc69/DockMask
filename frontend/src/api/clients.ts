@@ -11,6 +11,8 @@ import type {
   ConfigValidationResponse,
   ModelsResponse,
   ModelsRequest,
+  PreviewResponse,
+  ArtifactKind,
   ReportResponse,
 } from "./dto"
 
@@ -26,6 +28,21 @@ export class ApiError extends Error {
   ) {
     super(code)
   }
+}
+
+export function saveBlobInBrowser(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob)
+  const anchor = Object.assign(document.createElement("a"), {
+    href: url,
+    download: filename,
+  })
+  anchor.style.display = "none"
+  document.body.appendChild(anchor)
+  anchor.click()
+  window.setTimeout(() => {
+    anchor.remove()
+    URL.revokeObjectURL(url)
+  }, 1000)
 }
 
 async function sleep(milliseconds: number): Promise<void> {
@@ -178,6 +195,37 @@ export class ApiClient {
       undefined,
       signal,
     )
+  }
+
+  getPreview(jobId: string, signal?: AbortSignal): Promise<PreviewResponse> {
+    return this.request(
+      "GET",
+      `/jobs/${encodeURIComponent(jobId)}/preview`,
+      undefined,
+      signal,
+    )
+  }
+
+  async downloadArtifact(jobId: string, artifact: ArtifactKind): Promise<Blob> {
+    const endpoint = {
+      document: "document",
+      json: "report.json",
+      csv: "report.csv",
+      xlsx: "report.xlsx",
+    }[artifact]
+    const response = await fetch(
+      `${BASE_URL}/jobs/${encodeURIComponent(jobId)}/${endpoint}`,
+    )
+    if (!response.ok) {
+      const payload = (await response.json().catch(() => null)) as {
+        detail?: unknown
+      } | null
+      throw new ApiError(
+        response.status,
+        typeof payload?.detail === "string" ? payload.detail : "request_failed",
+      )
+    }
+    return response.blob()
   }
 
   downloadUrl(jobId: string, artifact: "document" | "report.xlsx"): string {

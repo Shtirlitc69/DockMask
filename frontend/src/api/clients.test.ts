@@ -2,9 +2,13 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { ApiClient } from "./clients"
+import { ApiClient, saveBlobInBrowser } from "./clients"
 
-afterEach(() => vi.restoreAllMocks())
+afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+})
 
 describe("local API client", () => {
   it("sends a write-only key only to the local config endpoint", async () => {
@@ -47,5 +51,27 @@ describe("local API client", () => {
     expect(String(url)).not.toMatch(/^https?:\/\//)
     expect(init?.method).toBe("POST")
     expect(String(init?.body)).toContain("router.example")
+  })
+
+  it("attaches the browser download link before clicking and cleans it later", () => {
+    vi.useFakeTimers()
+    const createObjectURL = vi.fn(() => "blob:dockmask")
+    const revokeObjectURL = vi.fn()
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL })
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => undefined)
+
+    saveBlobInBrowser(new Blob(["report"]), "отчёт.csv")
+
+    const anchor = document.body.querySelector("a")
+    expect(anchor?.download).toBe("отчёт.csv")
+    expect(anchor?.href).toBe("blob:dockmask")
+    expect(click).toHaveBeenCalledOnce()
+    expect(revokeObjectURL).not.toHaveBeenCalled()
+
+    vi.advanceTimersByTime(1000)
+    expect(document.body.querySelector("a")).toBeNull()
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:dockmask")
   })
 })

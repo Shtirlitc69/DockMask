@@ -63,14 +63,20 @@ async def identify_parties(
 
         context_snippet: str | None = None
         for match in matches:
-            if (
-                match.entity_type not in _PARTY_ENTITY_TYPES
-                or match.party_role is not PartyRole.UNKNOWN
-            ):
+            if match.entity_type not in _PARTY_ENTITY_TYPES:
                 continue
 
             if has_local_evidence:
-                match.party_role = local_role
+                if local_role is not PartyRole.UNKNOWN and (
+                    match.party_role is PartyRole.UNKNOWN
+                    or llm_client.provides_inline_roles
+                ):
+                    match.party_role = local_role
+                continue
+
+            if match.party_role is not PartyRole.UNKNOWN:
+                continue
+            if llm_client.provides_inline_roles:
                 continue
 
             if context_snippet is None:

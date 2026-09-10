@@ -13,6 +13,7 @@ class VLLMClient(OpenAICompatibleClient):
     """Thin provider-specific wrapper around the common wire protocol."""
 
     source = "vllm"
+    provider_name = "vllm"
 
     def __init__(
         self,

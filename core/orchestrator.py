@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
 import tempfile
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
+from typing import ParamSpec, TypeVar
 
 from core.detectors.entity_detector import detect_all
 from core.detectors.party_identifier import identify_parties
@@ -28,6 +30,22 @@ from core.redaction.pdf_redactor import redact_pdf
 from core.redaction.xlsx_redactor import redact_xlsx
 from core.report.report_generator import ReportGenerator, generate_report
 from llm.base import BaseLLMClient
+from llm.http_utils import LLMContextLimitError, LLMHTTPError, LLMProviderError
+from llm.structured import LLMResponseError
+
+LOGGER = logging.getLogger(__name__)
+P = ParamSpec("P")
+T = TypeVar("T")
+
+
+async def _file_operation(function: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
+    """Drain a running file operation before cancellation allows directory cleanup."""
+    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await asyncio.gather(task, return_exceptions=True)
+        raise
 
 _EXTRACTORS = {
     DocumentFormat.DOCX: extract_docx,
@@ -136,7 +154,7 @@ async def run_pipeline(
     staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=output_root))
     try:
         _check_cancelled(cancel_check)
-        extracted = await asyncio.to_thread(_EXTRACTORS[document_format], source)
+        extracted = await _file_operation(_EXTRACTORS[document_format], source)
         _check_cancelled(cancel_check)
         if extracted.is_scanned:
             if not use_ocr:
@@ -145,7 +163,7 @@ async def run_pipeline(
                 return PipelineResult(status=JobStatus.FAILED, error_message="ocr_unavailable")
             for page_number in extracted.ocr_pages:
                 _check_cancelled(cancel_check)
-                page_blocks = await asyncio.to_thread(
+                page_blocks = await _file_operation(
                     ocr_provider.extract_page,
                     source,
                     page_number,
@@ -156,7 +174,12 @@ async def run_pipeline(
                 extracted.blocks.extend(page_blocks)
 
         if prepared_matches is None:
-            matches_by_block = await detect_all(extracted.blocks, normalized_types, llm_client)
+            matches_by_block = await detect_all(
+                extracted.blocks,
+                normalized_types,
+                llm_client,
+                cancel_check=cancel_check,
+            )
             _check_cancelled(cancel_check)
             await identify_parties(extracted.blocks, matches_by_block, llm_client)
         else:
@@ -173,7 +196,7 @@ async def run_pipeline(
             )
 
         staged_document = staging / f"{source.stem}.redacted{source.suffix.lower()}"
-        await asyncio.to_thread(
+        await _file_operation(
             _REDACTORS[document_format],
             source,
             staged_document,
@@ -183,13 +206,13 @@ async def run_pipeline(
         flat_matches = _flatten_matches(matches_by_block)
         staged_json = staging / f"{source.stem}.report.json"
         staged_xlsx = staging / f"{source.stem}.report.xlsx"
-        await asyncio.to_thread(
+        await _file_operation(
             ReportGenerator.write_report,
             staged_json,
             flat_matches,
             applied_only=True,
         )
-        await asyncio.to_thread(generate_report, matches_by_block, staged_xlsx)
+        await _file_operation(generate_report, matches_by_block, staged_xlsx)
         _check_cancelled(cancel_check)
 
         final_document = output_root / staged_document.name
@@ -217,7 +240,40 @@ async def run_pipeline(
         return PipelineResult(status=JobStatus.FAILED, error_message="ocr_unavailable")
     except OcrProcessingError:
         return PipelineResult(status=JobStatus.FAILED, error_message="ocr_failed")
-    except Exception:  # noqa: BLE001 - boundary converts every failure to a safe code
+    except LLMContextLimitError:
+        LOGGER.error(
+            "pipeline_provider_context_limit provider=%s",
+            llm_client.provider_name,
+        )
+        return PipelineResult(status=JobStatus.FAILED, error_message="provider_context_limit")
+    except LLMHTTPError as exc:
+        if llm_client.provider_name == "gigachat":
+            code = {
+                401: "gigachat_authentication_failed",
+                402: "gigachat_payment_required",
+                403: "gigachat_permission_denied",
+                429: "gigachat_rate_limited",
+            }.get(exc.status_code, "provider_unavailable")
+        else:
+            code = "provider_unavailable"
+        LOGGER.error(
+            "pipeline_provider_http_failed provider=%s status=%s",
+            llm_client.provider_name,
+            exc.status_code,
+        )
+        return PipelineResult(status=JobStatus.FAILED, error_message=code)
+    except LLMResponseError:
+        LOGGER.error("pipeline_provider_invalid_response provider=%s", llm_client.provider_name)
+        return PipelineResult(status=JobStatus.FAILED, error_message="provider_invalid_response")
+    except LLMProviderError as exc:
+        LOGGER.error(
+            "pipeline_provider_failed provider=%s exception_type=%s",
+            llm_client.provider_name,
+            type(exc).__name__,
+        )
+        return PipelineResult(status=JobStatus.FAILED, error_message="provider_unavailable")
+    except Exception as exc:  # noqa: BLE001 - boundary converts every failure to a safe code
+        LOGGER.error("pipeline_failed exception_type=%s", type(exc).__name__)
         return PipelineResult(status=JobStatus.FAILED, error_message="pipeline_failed")
     finally:
         shutil.rmtree(staging, ignore_errors=True)

@@ -142,6 +142,41 @@ export interface ReportResponse {
   replacements: ReplacementResponse[]
 }
 
+export interface PreviewSegment {
+  text: string
+  replacement: string | null
+}
+
+export interface PreviewLine {
+  id: string
+  type: "title" | "subtitle" | "label" | "field" | "text" | "divider" | "spacer"
+  segments: PreviewSegment[]
+}
+
+export interface PreviewTableCell {
+  segments: PreviewSegment[]
+}
+
+export interface PreviewTable {
+  id: string
+  type: "table"
+  rows: PreviewTableCell[][]
+}
+
+export interface PreviewResponse {
+  format: "docx" | "pdf" | "xlsx"
+  elements: Array<PreviewLine | PreviewTable>
+  truncated: boolean
+}
+
+export type ArtifactKind = "document" | "json" | "csv" | "xlsx"
+
+export interface NativeSaveResult {
+  status: "saved" | "cancelled" | "error"
+  code?: string
+  filename?: string
+}
+
 export interface HealthResponse {
   status: "ok" | "degraded"
 

@@ -163,6 +163,43 @@ class ReportResponse(BaseModel):
     replacements: list[ReplacementResponse]
 
 
+class PreviewSegmentResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str
+    replacement: str | None = None
+
+
+class PreviewLineResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    type: Literal["title", "subtitle", "label", "field", "text", "divider", "spacer"]
+    segments: list[PreviewSegmentResponse] = Field(default_factory=list)
+
+
+class PreviewTableCellResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    segments: list[PreviewSegmentResponse] = Field(default_factory=list)
+
+
+class PreviewTableResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    type: Literal["table"]
+    rows: list[list[PreviewTableCellResponse]] = Field(default_factory=list)
+
+
+class PreviewResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    format: DocumentFormat
+    elements: list[PreviewLineResponse | PreviewTableResponse] = Field(default_factory=list)
+    truncated: bool = False
+
+
 class HealthResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

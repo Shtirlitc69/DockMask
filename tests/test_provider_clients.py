@@ -5,14 +5,14 @@ from __future__ import annotations
 import json
 import unittest
 from collections.abc import Callable
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from core.models import EntityType, PartyRole
+from core.models import BlockKind, EntityType, Location, PartyRole, TextBlock
 from llm.anthropic_client import AnthropicClient
 from llm.catalog import list_llm_models, validate_llm_connection
-from llm.http_utils import LLMHTTPError
+from llm.http_utils import LLMContextLimitError, LLMHTTPError
 from llm.ollama_client import OllamaClient
 from llm.openai_client import OpenAIClient
 from llm.openai_compatible_client import OpenAICompatibleClient
@@ -60,6 +60,93 @@ class ProviderClientTests(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(request.content)
         self.assertEqual(payload["model"], "router-model")
         self.assertEqual(payload["response_format"]["type"], "json_schema")
+
+    async def test_all_builtin_structured_providers_batch_many_blocks_once(self) -> None:
+        blocks = [
+            TextBlock(
+                block_id=f"p:{index}",
+                text=f"Организация {index}",
+                kind=BlockKind.DOCX_PARAGRAPH,
+                location=Location(paragraph_index=index),
+            )
+            for index in range(101)
+        ]
+        content = (
+            '{"entities":[{"block_id":100,"type":"organization",'
+            '"text":"Организация 100","party_role":"buyer"}]}'
+        )
+        cases = (
+            (
+                "openai",
+                lambda http: OpenAIClient(
+                    api_key="key",
+                    model="model",
+                    http_client=http,
+                ),
+                120_000,
+            ),
+            (
+                "anthropic",
+                lambda http: AnthropicClient(
+                    api_key="key",
+                    model="model",
+                    http_client=http,
+                ),
+                120_000,
+            ),
+            (
+                "openai-compatible",
+                lambda http: OpenAICompatibleClient(
+                    model="model",
+                    base_url="https://router.example/v1",
+                    http_client=http,
+                ),
+                24_000,
+            ),
+            (
+                "ollama",
+                lambda http: OllamaClient(model="model", http_client=http),
+                24_000,
+            ),
+            (
+                "vllm",
+                lambda http: VLLMClient(model="model", http_client=http),
+                24_000,
+            ),
+        )
+        for name, factory, expected_limit in cases:
+            with self.subTest(provider=name):
+                requests: list[httpx.Request] = []
+
+                def handler(
+                    request: httpx.Request,
+                    captured: list[httpx.Request] = requests,
+                ) -> httpx.Response:
+                    captured.append(request)
+                    if request.url.path.endswith("/messages"):
+                        return httpx.Response(
+                            200,
+                            json={"content": [{"type": "text", "text": content}]},
+                            request=request,
+                        )
+                    if request.url.path.endswith("/api/chat"):
+                        return httpx.Response(
+                            200,
+                            json={"message": {"content": content}},
+                            request=request,
+                        )
+                    return openai_response(request, content)
+
+                client = factory(self.make_http_client(handler))
+                result = await client.find_entities_in_blocks(
+                    blocks,
+                    [EntityType.ORGANIZATION],
+                )
+
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(client.batch_max_chars, expected_limit)
+                self.assertEqual(client.batch_max_concurrency, 1)
+                self.assertEqual(result["p:100"][0].party_role, PartyRole.BUYER)
 
     async def test_openai_uses_official_endpoint_and_lists_models(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -177,6 +264,64 @@ class ProviderClientTests(unittest.IsolatedAsyncioTestCase):
         ):
             await client.classify_party("Поставщик Тест", "Тест")
         self.assertEqual(calls, 3)
+        self.assertNotIn(secret, str(raised.exception))
+
+    async def test_retry_after_is_honored_with_three_total_attempts(self) -> None:
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if calls < 3:
+                return httpx.Response(
+                    429,
+                    headers={"Retry-After": "7"},
+                    request=request,
+                )
+            return openai_response(request, '{"role":"unknown"}')
+
+        client = OpenAICompatibleClient(
+            model="model",
+            base_url="https://router.example/v1",
+            http_client=self.make_http_client(handler),
+        )
+        sleep = AsyncMock()
+        with (
+            patch("llm.http_utils.asyncio.sleep", new=sleep),
+            patch("llm.http_utils.random.uniform", return_value=0.0),
+        ):
+            await client.classify_party("Компания", "Компания")
+
+        self.assertEqual(calls, 3)
+        self.assertEqual([item.args[0] for item in sleep.await_args_list], [7.0, 7.0])
+
+    async def test_context_limit_is_safe_and_is_not_retried(self) -> None:
+        calls = 0
+        secret = "private-prompt-value"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "code": "context_length_exceeded",
+                        "message": secret,
+                    }
+                },
+                request=request,
+            )
+
+        client = OpenAICompatibleClient(
+            model="model",
+            base_url="https://router.example/v1",
+            http_client=self.make_http_client(handler),
+        )
+        with self.assertRaises(LLMContextLimitError) as raised:
+            await client.classify_party("Компания", "Компания")
+
+        self.assertEqual(calls, 1)
         self.assertNotIn(secret, str(raised.exception))
 
     async def test_catalog_lists_models_and_validates(self) -> None:

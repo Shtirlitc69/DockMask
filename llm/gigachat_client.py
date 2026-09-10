@@ -3,43 +3,27 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
-from collections.abc import Sequence
 from typing import Self
 from uuid import uuid4
 
 import httpx
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from core.models import EntitySpan, EntityType, PartyRole
-from llm.base import BaseLLMClient
-from llm.http_utils import LLMHTTPError, LLMProviderError
-from llm.prompts import (
-    ENTITY_SYSTEM_PROMPT,
-    PARTY_SYSTEM_PROMPT,
-    ROLE_RESPONSE_SCHEMA,
-    build_entity_prompt,
-    build_party_prompt,
-    entity_response_schema,
+from llm.http_utils import (
+    LLMContextLimitError,
+    LLMHTTPError,
+    LLMProviderError,
+    is_context_limit_response,
+    retry_delay,
 )
-from llm.structured import (
-    EntitiesResponse,
-    LLMResponseError,
-    RoleResponse,
-    parse_model_json,
-    to_entity_spans,
-)
+from llm.structured import LLMResponseError, StructuredLLMClient
 from llm.types import LLMModelInfo
 
-LOGGER = logging.getLogger(__name__)
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 MODELS_PATH = "/v1/models"
 MAX_ATTEMPTS = 3
-RETRY_BASE_DELAY_SECONDS = 0.1
 TOKEN_SAFETY_RATIO = 0.1
-GIGACHAT_SOURCE = "gigachat"
-GIGACHAT_CONFIDENCE = 0.8
 USER_AGENT = "DockMask/0.1"
 
 
@@ -83,8 +67,15 @@ class _ChatResponse(BaseModel):
     choices: list[_ChatChoice]
 
 
-class GigaChatClient(BaseLLMClient):
+class GigaChatClient(StructuredLLMClient):
     """Call GigaChat through an injected or internally owned HTTP client."""
+
+    batch_max_chars = 180_000
+    batch_max_concurrency = 1
+    provides_inline_roles = True
+    provider_name = "gigachat"
+    source = "gigachat"
+    confidence = 0.8
 
     def __init__(
         self,
@@ -128,46 +119,6 @@ class GigaChatClient(BaseLLMClient):
     async def __aexit__(self, *_args: object) -> None:
         await self.aclose()
 
-    async def find_entities(
-        self,
-        text: str,
-        types: Sequence[EntityType],
-    ) -> list[EntitySpan]:
-        requested = frozenset(types)
-        if not text or not requested:
-            return []
-
-        content = await self._complete(
-            build_entity_prompt(text, requested),
-            response_schema=entity_response_schema(requested),
-            system_prompt=ENTITY_SYSTEM_PROMPT,
-        )
-        payload = parse_model_json(content, EntitiesResponse)
-        return to_entity_spans(
-            text,
-            requested,
-            payload.entities,
-            source=GIGACHAT_SOURCE,
-            confidence=GIGACHAT_CONFIDENCE,
-            logger=LOGGER,
-        )
-
-    async def classify_party(
-        self,
-        context_snippet: str,
-        candidate_name: str,
-    ) -> PartyRole | None:
-        if not context_snippet or not candidate_name:
-            return None
-
-        content = await self._complete(
-            build_party_prompt(context_snippet, candidate_name),
-            response_schema=ROLE_RESPONSE_SCHEMA,
-            system_prompt=PARTY_SYSTEM_PROMPT,
-        )
-        role = PartyRole(parse_model_json(content, RoleResponse).role)
-        return None if role is PartyRole.UNKNOWN else role
-
     async def list_models(self) -> list[LLMModelInfo]:
         """Return chat models available to the configured GigaChat account."""
 
@@ -191,7 +142,7 @@ class GigaChatClient(BaseLLMClient):
                     raise GigaChatError(
                         "GigaChat model list failed after retryable network errors"
                     ) from exc
-                await self._retry_delay(attempt)
+                await retry_delay(attempt)
                 continue
             if response.status_code == 401 and not refreshed_after_401:
                 refreshed_after_401 = True
@@ -200,7 +151,7 @@ class GigaChatClient(BaseLLMClient):
             if self._is_retryable_status(response.status_code):
                 attempt += 1
                 if attempt < MAX_ATTEMPTS:
-                    await self._retry_delay(attempt)
+                    await retry_delay(attempt, response)
                     continue
             break
         if not 200 <= response.status_code < 300:
@@ -265,17 +216,21 @@ class GigaChatClient(BaseLLMClient):
                     raise GigaChatError(
                         "GigaChat request failed after retryable network errors"
                     ) from exc
-                await self._retry_delay(transient_attempt)
+                await retry_delay(transient_attempt)
                 continue
 
             if response.status_code == 401 and not refreshed_after_401:
                 refreshed_after_401 = True
                 token = await self._refresh_rejected_token(token)
                 continue
+            if is_context_limit_response(response):
+                raise LLMContextLimitError(
+                    "GigaChat request exceeded the model context limit"
+                )
             if self._is_retryable_status(response.status_code):
                 transient_attempt += 1
                 if transient_attempt < MAX_ATTEMPTS:
-                    await self._retry_delay(transient_attempt)
+                    await retry_delay(transient_attempt, response)
                     continue
             if not 200 <= response.status_code < 300:
                 raise GigaChatHTTPError(response.status_code)
@@ -329,13 +284,13 @@ class GigaChatClient(BaseLLMClient):
                     raise GigaChatError(
                         "GigaChat OAuth request failed after retryable network errors"
                     ) from exc
-                await self._retry_delay(attempt)
+                await retry_delay(attempt)
                 continue
 
             if self._is_retryable_status(response.status_code):
                 attempt += 1
                 if attempt < MAX_ATTEMPTS:
-                    await self._retry_delay(attempt)
+                    await retry_delay(attempt, response)
                     continue
             if not 200 <= response.status_code < 300:
                 raise GigaChatHTTPError(response.status_code)
@@ -362,7 +317,3 @@ class GigaChatClient(BaseLLMClient):
     @staticmethod
     def _is_retryable_status(status_code: int) -> bool:
         return status_code == 429 or 500 <= status_code < 600
-
-    @staticmethod
-    async def _retry_delay(attempt: int) -> None:
-        await asyncio.sleep(RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1)))

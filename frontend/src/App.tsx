@@ -1,11 +1,12 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from "react"
 
-import { apiClient, ApiError } from "./api/clients"
+import { apiClient, ApiError, saveBlobInBrowser } from "./api/clients"
 import type {
   ConfigResponse,
   EntityType,
   GigaChatScope,
   ProviderId,
+  PreviewResponse,
 } from "./api/dto"
 import { DATA_TYPE_OPTIONS, PROCESSING_STEPS } from "./options"
 import { useDocumentPolling } from "./hooks/useDocumentPolling"
@@ -47,6 +48,8 @@ const PROVIDER_ERROR_LABELS: Record<string, string> = {
   gigachat_rate_limited: "исчерпан лимит запросов GigaChat",
   provider_invalid_response: "провайдер вернул некорректный ответ",
   provider_unavailable: "провайдер временно недоступен",
+  provider_context_limit:
+    "документ не помещается в контекст выбранной модели даже после разделения",
   connection_failed: "нет соединения с локальным приложением",
   certificate_missing: "сертификат GigaChat не найден",
   certificate_expired: "сертификат GigaChat просрочен",
@@ -54,10 +57,57 @@ const PROVIDER_ERROR_LABELS: Record<string, string> = {
   ocr_unavailable: "локальный модуль OCR отсутствует в сборке",
   ocr_failed: "не удалось распознать сканированный PDF",
   ocr_no_text: "OCR не обнаружил текста на одной из страниц",
+  pipeline_failed: "внутренняя ошибка обработки документа",
+  preview_unavailable: "не удалось сформировать предпросмотр",
+  save_failed: "не удалось сохранить файл",
 }
 
 function providerErrorLabel(code: string): string {
   return PROVIDER_ERROR_LABELS[code] ?? code
+}
+
+const PARTY_ROLE_LABELS: Record<string, string> = {
+  supplier: "Поставщик",
+  buyer: "Покупатель",
+  unknown: "Не определено",
+}
+
+function partyRoleLabel(value: string): string {
+  return PARTY_ROLE_LABELS[value] ?? value
+}
+
+function mapPreviewDocument(
+  preview: PreviewResponse,
+  replacements: Replacement[],
+): DocElement[] {
+  const replacementIds = new Map<string, string>()
+  for (const replacement of replacements) {
+    if (!replacementIds.has(replacement.masked))
+      replacementIds.set(replacement.masked, replacement.id)
+  }
+  const mapSegments = (segments: Array<{ text: string; replacement: string | null }>) =>
+    segments.map((segment) => ({
+      text: segment.text,
+      replacementId: segment.replacement
+        ? replacementIds.get(segment.replacement)
+        : undefined,
+    }))
+  return preview.elements.map((element) => {
+    if (element.type === "table") {
+      return {
+        id: element.id,
+        type: "table" as const,
+        rows: element.rows.map((row) =>
+          row.map((cell) => ({ segments: mapSegments(cell.segments) })),
+        ),
+      }
+    }
+    return {
+      id: element.id,
+      type: element.type,
+      segments: mapSegments(element.segments),
+    }
+  })
 }
 
 function confidenceColor(c: number) {
@@ -889,7 +939,7 @@ function ClarifyingModal({
                       className="text-xs"
                       style={{ color: "var(--foreground)" }}
                     >
-                      {opt}
+                      {partyRoleLabel(opt)}
                     </span>
                   </label>
                 ))}
@@ -1456,6 +1506,10 @@ function ResultsView({
   replacements,
   questions,
   document,
+  previewError,
+  previewTruncated,
+  savingKind,
+  saveMessage,
 
   onDownload,
   onReset,
@@ -1465,6 +1519,10 @@ function ResultsView({
   questions: ClarifyingQuestion[]
 
   document: DocElement[]
+  previewError: string | null
+  previewTruncated: boolean
+  savingKind: "document" | "json" | "csv" | "xlsx" | null
+  saveMessage: string | null
 
   onDownload: (fmt: "document" | "json" | "csv" | "xlsx") => void
   onReset: () => void
@@ -1585,7 +1643,24 @@ function ResultsView({
       <div className="flex-1 overflow-y-auto p-6">
         {tab === "preview" && (
           <div className="max-w-2xl mx-auto">
-            {document.length ? (
+            {previewTruncated && (
+              <div className="mb-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-400">
+                Предпросмотр сокращён из-за размера документа. Полная версия доступна
+                через сохранение файла.{" "}
+                <button className="underline" onClick={() => onDownload("document")}>
+                  Сохранить документ
+                </button>
+              </div>
+            )}
+            {previewError ? (
+              <div
+                className="rounded-lg border p-6 text-sm"
+                style={{ borderColor: "var(--border)", background: "var(--card)" }}
+              >
+                {providerErrorLabel(previewError)}. Обезличенный документ можно
+                сохранить на вкладке «Экспорт».
+              </div>
+            ) : document.length ? (
               <DocumentPreview
                 document={document}
                 replacements={replacements}
@@ -1598,8 +1673,7 @@ function ResultsView({
                   background: "var(--card)",
                 }}
               >
-                Предпросмотр исходного формата в браузере не создаётся. Скачайте
-                обезличенный документ — подсветка замен сохранена внутри файла.
+                В обезличенном документе нет доступного для отображения текста.
               </div>
             )}
           </div>
@@ -1630,7 +1704,7 @@ function ResultsView({
                       </span>
                       {" → "}
                       <span style={{ color: "var(--foreground)" }}>
-                        {q.answer}
+                        {partyRoleLabel(q.answer ?? "")}
                       </span>
                     </div>
                   </div>
@@ -1652,7 +1726,8 @@ function ResultsView({
 
             <button
               onClick={() => onDownload("document")}
-              className="w-full rounded-lg border p-4 flex items-center gap-4 transition-colors hover:bg-white/5 cursor-pointer"
+              disabled={savingKind !== null}
+              className="w-full rounded-lg border p-4 flex items-center gap-4 transition-colors hover:bg-white/5 cursor-pointer disabled:opacity-50"
               style={{
                 borderColor: "var(--border)",
                 background: "var(--card)",
@@ -1680,7 +1755,7 @@ function ResultsView({
                   color: "var(--primary-foreground)",
                 }}
               >
-                Скачать
+                {savingKind === "document" ? "Сохранение…" : "Скачать"}
               </span>
             </button>
 
@@ -1700,7 +1775,8 @@ function ResultsView({
                 <button
                   key={fmt}
                   onClick={() => onDownload(fmt)}
-                  className="w-full rounded-lg border p-4 flex items-center gap-4 transition-colors hover:bg-white/5"
+                  disabled={savingKind !== null}
+                  className="w-full rounded-lg border p-4 flex items-center gap-4 transition-colors hover:bg-white/5 disabled:opacity-50"
                   style={{
                     borderColor: "var(--border)",
                     background: "var(--card)",
@@ -1725,11 +1801,16 @@ function ResultsView({
                     className="ml-auto text-xs mono"
                     style={{ color: "var(--muted-foreground)" }}
                   >
-                    .{fmt}
+                      {savingKind === fmt ? "Сохранение…" : `.${fmt}`}
                   </span>
                 </button>
               ))}
             </div>
+            {saveMessage && (
+              <div className="text-xs text-center" style={{ color: "var(--primary)" }}>
+                {saveMessage}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -1754,6 +1835,9 @@ export default function App() {
     PROCESSING_STEPS.map((s) => ({ ...s })),
   )
   const [replacements, setReplacements] = useState<Replacement[]>([])
+  const [previewDocument, setPreviewDocument] = useState<DocElement[]>([])
+  const [previewError, setPreviewError] = useState<string | null>(null)
+  const [previewTruncated, setPreviewTruncated] = useState(false)
   const [questions, setQuestions] = useState<ClarifyingQuestion[]>([])
   const [jobId, setJobId] = useState<string | null>(null)
   const [pollRevision, setPollRevision] = useState(0)
@@ -1762,10 +1846,15 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [clarifyingOpen, setClarifyingOpen] = useState(false)
   const [cancelling, setCancelling] = useState(false)
+  const [savingKind, setSavingKind] = useState<
+    "document" | "json" | "csv" | "xlsx" | null
+  >(null)
+  const [saveMessage, setSaveMessage] = useState<string | null>(null)
 
   const [isDragging, setIsDragging] = useState(false)
 
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const operationRef = useRef(0)
   const polling = useDocumentPolling(jobId, pollRevision)
 
   // Apply theme
@@ -1784,9 +1873,11 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    if (!jobId) return
+    const operation = operationRef.current
     if (polling.error) setError(polling.error)
     const job = polling.job
-    if (!job) return
+    if (!job || job.job_id !== jobId) return
     const completed = Math.min(
       PROCESSING_STEPS.length,
       Math.floor(job.progress / (100 / PROCESSING_STEPS.length)),
@@ -1807,37 +1898,60 @@ export default function App() {
         job.questions.map((question) => ({
           id: question.question_id,
           question: question.question,
-          context: question.related_entity_type ?? "роль стороны",
+          context:
+            DATA_TYPE_OPTIONS.find(
+              (option) => option.id === question.related_entity_type,
+            )?.label ?? "Роль стороны",
           options: question.options,
         })),
       )
       setClarifyingOpen(true)
       setStep("clarifying")
     } else if (job.status === "done") {
-      void apiClient
-        .getReport(job.job_id)
-        .then((report) => {
-          setReplacements(
-            report.replacements.map((item, index) => ({
-              id: `replacement-${index + 1}`,
-              original: item.original_value,
-              masked: item.replacement,
-              typeId: item.entity_type,
-              typeLabel:
-                DATA_TYPE_OPTIONS.find(
-                  (option) => option.id === item.entity_type,
-                )?.label ?? item.entity_type,
-              confidence: item.confidence,
-              location: formatApiLocation(item.location),
-            })),
-          )
-          setStep("results")
-        })
-        .catch((reason) =>
+      void Promise.allSettled([
+        apiClient.getReport(job.job_id),
+        apiClient.getPreview(job.job_id),
+      ]).then(([reportResult, previewResult]) => {
+        if (operation !== operationRef.current) return
+        if (reportResult.status === "rejected") {
           setError(
-            reason instanceof ApiError ? reason.code : "connection_failed",
-          ),
+            reportResult.reason instanceof ApiError
+              ? reportResult.reason.code
+              : "connection_failed",
+          )
+          return
+        }
+        const mappedReplacements = reportResult.value.replacements.map(
+          (item, index) => ({
+            id: `replacement-${index + 1}`,
+            original: item.original_value,
+            masked: item.replacement,
+            typeId: item.entity_type,
+            typeLabel:
+              DATA_TYPE_OPTIONS.find(
+                (option) => option.id === item.entity_type,
+              )?.label ?? item.entity_type,
+            confidence: item.confidence,
+            location: formatApiLocation(item.location),
+          }),
         )
+        setReplacements(mappedReplacements)
+        if (previewResult.status === "fulfilled") {
+          setPreviewDocument(
+            mapPreviewDocument(previewResult.value, mappedReplacements),
+          )
+          setPreviewTruncated(previewResult.value.truncated)
+          setPreviewError(null)
+        } else {
+          setPreviewDocument([])
+          setPreviewError(
+            previewResult.reason instanceof ApiError
+              ? previewResult.reason.code
+              : "connection_failed",
+          )
+        }
+        setStep("results")
+      })
     } else if (job.status === "failed") {
       setError(job.error ?? "pipeline_failed")
     } else if (job.status === "cancelled") {
@@ -1845,7 +1959,7 @@ export default function App() {
       setJobId(null)
       setStep("upload")
     }
-  }, [polling.error, polling.job])
+  }, [jobId, polling.error, polling.job])
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -1900,6 +2014,7 @@ export default function App() {
 
   const handleProcess = useCallback(async () => {
     if (!nativeFile) return
+    const operation = ++operationRef.current
     setError(null)
     setStep("processing")
     setProcessingSteps(
@@ -1912,9 +2027,18 @@ export default function App() {
           .filter((item) => item.selected)
           .map((item) => item.id as EntityType),
       })
+      if (operation !== operationRef.current) {
+        try {
+          await apiClient.cancelJob(created.job_id)
+        } catch {
+          setError("Не удалось подтвердить отмену задания на сервере.")
+        }
+        return
+      }
       setJobId(created.job_id)
       setPollRevision((value) => value + 1)
     } catch (reason) {
+      if (operation !== operationRef.current) return
       setError(reason instanceof ApiError ? reason.code : "connection_failed")
       setStep("upload")
     }
@@ -1928,6 +2052,7 @@ export default function App() {
 
   const handleFinalizeClarifying = useCallback(async () => {
     if (!jobId) return
+    const operation = operationRef.current
     try {
       await apiClient.submitAnswers(
         jobId,
@@ -1936,80 +2061,81 @@ export default function App() {
           answer: question.answer as "supplier" | "buyer" | "unknown",
         })),
       )
+      if (operation !== operationRef.current) return
       setClarifyingOpen(false)
       setStep("processing")
       setPollRevision((value) => value + 1)
     } catch (reason) {
+      if (operation !== operationRef.current) return
       setError(reason instanceof ApiError ? reason.code : "connection_failed")
     }
   }, [jobId, questions])
 
-  const handleCancel = useCallback(async () => {
-    if (!jobId || cancelling) return
-    setCancelling(true)
-    setError(null)
-    try {
-      await apiClient.cancelJob(jobId)
-      setClarifyingOpen(false)
-      setStep("processing")
-      setPollRevision((value) => value + 1)
-    } catch (reason) {
-      setError(reason instanceof ApiError ? reason.code : "connection_failed")
-    } finally {
-      setCancelling(false)
-    }
-  }, [cancelling, jobId, polling])
-
-  const handleDownload = useCallback(
-    (fmt: "document" | "json" | "csv" | "xlsx") => {
-      if (!jobId) return
-      if (fmt !== "csv") {
-        const artifact =
-          fmt === "xlsx"
-            ? "report.xlsx"
-            : fmt === "json"
-              ? "report"
-              : "document"
-        const anchor = Object.assign(document.createElement("a"), {
-          href: `/api/jobs/${encodeURIComponent(jobId)}/${artifact}`,
-          download: "",
-        })
-        anchor.click()
-      } else {
-        const rows = [
-          "№,Тип данных,Исходный текст,Маркер,Уверенность,Расположение",
-
-          ...replacements.map(
-            (r, i) =>
-              `${i + 1},"${r.typeLabel}","${r.original}","${r.masked}","${Math.round(r.confidence * 100)}%","${r.location}"`,
-          ),
-        ].join("\n")
-
-        const blob = new Blob(["﻿" + rows], { type: "text/csv;charset=utf-8" })
-        const url = URL.createObjectURL(blob)
-        const a = Object.assign(document.createElement("a"), {
-          href: url,
-          download: "anonymization_report.csv",
-        })
-        a.click()
-        URL.revokeObjectURL(url)
-      }
-    },
-    [jobId, replacements],
-  )
-
-  const handleReset = useCallback(() => {
+  const resetToUpload = useCallback(() => {
+    operationRef.current += 1
     setFile(null)
     setNativeFile(null)
     setJobId(null)
     setStep("upload")
-
     setReplacements([])
-
+    setPreviewDocument([])
+    setPreviewError(null)
+    setPreviewTruncated(false)
     setQuestions([])
     setError(null)
+    setClarifyingOpen(false)
     setCancelling(false)
+    setSavingKind(null)
+    setSaveMessage(null)
   }, [])
+
+  const handleCancel = useCallback(async () => {
+    polling.stopPolling()
+    resetToUpload()
+    if (!jobId) return
+    try {
+      await apiClient.cancelJob(jobId)
+    } catch {
+      setError("Не удалось подтвердить отмену задания на сервере.")
+    }
+  }, [jobId, polling, resetToUpload])
+
+  const handleDownload = useCallback(
+    async (fmt: "document" | "json" | "csv" | "xlsx") => {
+      if (!jobId) return
+      const sourceName = file?.name ?? "документ"
+      const dot = sourceName.lastIndexOf(".")
+      const stem = dot > 0 ? sourceName.slice(0, dot) : sourceName
+      const sourceExtension = dot > 0 ? sourceName.slice(dot).toLowerCase() : ".docx"
+      const suggestedFilename =
+        fmt === "document"
+          ? `${stem}_обезличенный${sourceExtension}`
+          : `${stem}_отчёт.${fmt}`
+      setSavingKind(fmt)
+      setSaveMessage(null)
+      setError(null)
+      try {
+        const nativeSave = window.pywebview?.api?.save_artifact
+        if (nativeSave) {
+          const result = await nativeSave(jobId, fmt, suggestedFilename)
+          if (result.status === "error")
+            throw new ApiError(0, result.code ?? "save_failed")
+          if (result.status === "saved") setSaveMessage("Файл сохранён")
+          return
+        }
+        const blob = await apiClient.downloadArtifact(jobId, fmt)
+        saveBlobInBrowser(blob, suggestedFilename)
+        setSaveMessage("Загрузка началась")
+      } catch (reason) {
+        setError(reason instanceof ApiError ? reason.code : "save_failed")
+      } finally {
+        setSavingKind(null)
+      }
+    },
+    [file?.name, jobId],
+  )
+
+  const handleReset = resetToUpload
 
   return (
     <div
@@ -2113,7 +2239,11 @@ export default function App() {
           <ResultsView
             replacements={replacements}
             questions={questions}
-            document={[]}
+            document={previewDocument}
+            previewError={previewError}
+            previewTruncated={previewTruncated}
+            savingKind={savingKind}
+            saveMessage={saveMessage}
             onDownload={handleDownload}
             onReset={handleReset}
           />

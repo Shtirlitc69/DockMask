@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from core.detectors.rule_based import detect_rule_based
-from core.models import EntitySpan, EntityType, Match, TextBlock
+from core.models import ENTITY_MARKER_PREFIXES, EntitySpan, EntityType, Match, TextBlock
 from llm.base import BaseLLMClient
+from llm.http_utils import LLMContextLimitError
 
 RULE_BASED_TYPES = frozenset(
     {
@@ -33,13 +33,24 @@ LLM_BASED_TYPES = frozenset(
     }
 )
 
-LLM_MAX_CONCURRENCY = 4
+LLM_MAX_CONCURRENCY = 1
+LLM_FRAGMENT_OVERLAP = 512
+LLM_MIN_FRAGMENT_CHARS = 2_000
+LLM_MAX_ADAPTIVE_DEPTH = 8
+LLM_MAX_REQUESTS_PER_JOB = 64
 
 
 @dataclass(frozen=True, slots=True)
 class _Candidate:
     span: EntitySpan
     is_rule_based: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _LLMFragment:
+    block: TextBlock
+    original_block_id: str
+    offset: int
 
 
 def _ordered_types(
@@ -104,20 +115,183 @@ def _resolve_overlaps(candidates: Sequence[_Candidate]) -> list[EntitySpan]:
     return sorted(selected, key=lambda span: (span.start, span.end, span.entity_type.value))
 
 
-async def _find_llm_entities(
-    block: TextBlock,
+def _preferred_cut(text: str, start: int, hard_end: int) -> int:
+    search_start = start + (hard_end - start) // 2
+    candidates = (
+        text.rfind("\n", search_start, hard_end),
+        text.rfind(" ", search_start, hard_end),
+    )
+    boundary = max(candidates)
+    return boundary + 1 if boundary >= search_start else hard_end
+
+
+def _fragment_blocks(
+    blocks: Sequence[TextBlock],
+    max_chars: int,
+) -> list[_LLMFragment]:
+    fragments: list[_LLMFragment] = []
+    for block_index, block in enumerate(blocks):
+        if max_chars <= 0 or len(block.text) <= max_chars:
+            fragments.append(_LLMFragment(block, block.block_id, 0))
+            continue
+        start = 0
+        fragment_index = 0
+        overlap = min(LLM_FRAGMENT_OVERLAP, max(0, max_chars // 4))
+        while start < len(block.text):
+            hard_end = min(len(block.text), start + max_chars)
+            end = _preferred_cut(block.text, start, hard_end)
+            fragment_text = block.text[start:end]
+            fragments.append(
+                _LLMFragment(
+                    TextBlock(
+                        block_id=f"llm-fragment:{block_index}:{fragment_index}",
+                        text=fragment_text,
+                        kind=block.kind,
+                        location=block.location,
+                    ),
+                    block.block_id,
+                    start,
+                )
+            )
+            if end >= len(block.text):
+                break
+            start = max(start + 1, end - overlap)
+            fragment_index += 1
+    return fragments
+
+
+def _llm_batches(
+    fragments: Sequence[_LLMFragment],
+    max_chars: int,
+) -> list[list[_LLMFragment]]:
+    if max_chars <= 0:
+        return [[fragment] for fragment in fragments]
+    batches: list[list[_LLMFragment]] = []
+    current: list[_LLMFragment] = []
+    current_chars = 0
+    for fragment in fragments:
+        block_chars = len(fragment.block.text)
+        if current and current_chars + block_chars > max_chars:
+            batches.append(current)
+            current = []
+            current_chars = 0
+        current.append(fragment)
+        current_chars += block_chars
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _bisect_fragment(fragment: _LLMFragment) -> tuple[_LLMFragment, _LLMFragment] | None:
+    text = fragment.block.text
+    if len(text) <= LLM_MIN_FRAGMENT_CHARS:
+        return None
+    midpoint = len(text) // 2
+    split = _preferred_cut(text, 0, midpoint)
+    left_end = min(len(text), split + LLM_FRAGMENT_OVERLAP)
+    right_start = max(0, split - LLM_FRAGMENT_OVERLAP)
+    if left_end >= len(text) or right_start <= 0:
+        left_end = midpoint
+        right_start = midpoint
+    left = _LLMFragment(
+        TextBlock(
+            block_id=f"{fragment.block.block_id}:left",
+            text=text[:left_end],
+            kind=fragment.block.kind,
+            location=fragment.block.location,
+        ),
+        fragment.original_block_id,
+        fragment.offset,
+    )
+    right = _LLMFragment(
+        TextBlock(
+            block_id=f"{fragment.block.block_id}:right",
+            text=text[right_start:],
+            kind=fragment.block.kind,
+            location=fragment.block.location,
+        ),
+        fragment.original_block_id,
+        fragment.offset + right_start,
+    )
+    return left, right
+
+
+def _split_failed_batch(
+    batch: list[_LLMFragment],
+) -> tuple[list[_LLMFragment], list[_LLMFragment]] | None:
+    if len(batch) > 1:
+        midpoint = len(batch) // 2
+        return batch[:midpoint], batch[midpoint:]
+    divided = _bisect_fragment(batch[0])
+    return ([divided[0]], [divided[1]]) if divided else None
+
+
+async def _find_llm_entities_adaptively(
+    fragments: Sequence[_LLMFragment],
     llm_types: Sequence[EntityType],
     llm_client: BaseLLMClient,
-    semaphore: asyncio.Semaphore,
-) -> list[EntitySpan]:
-    async with semaphore:
-        return await llm_client.find_entities(block.text, llm_types)
+    cancel_check: Callable[[], None] | None,
+) -> dict[str, list[EntitySpan]]:
+    pending: list[tuple[list[_LLMFragment], int]] = [
+        (batch, 0)
+        for batch in reversed(_llm_batches(fragments, llm_client.batch_max_chars))
+    ]
+    result: defaultdict[str, list[EntitySpan]] = defaultdict(list)
+    seen: set[tuple[str, EntityType, int, int]] = set()
+    request_count = 0
+    while pending:
+        if cancel_check is not None:
+            cancel_check()
+        batch, depth = pending.pop()
+        if request_count >= LLM_MAX_REQUESTS_PER_JOB:
+            raise LLMContextLimitError("LLM request budget exceeded")
+        request_count += 1
+        try:
+            spans_by_fragment = await llm_client.find_entities_in_blocks(
+                [fragment.block for fragment in batch],
+                llm_types,
+            )
+        except LLMContextLimitError:
+            split = (
+                _split_failed_batch(batch)
+                if depth < LLM_MAX_ADAPTIVE_DEPTH
+                else None
+            )
+            if split is None:
+                raise
+            left, right = split
+            pending.append((right, depth + 1))
+            pending.append((left, depth + 1))
+            continue
+        for fragment in batch:
+            for span in spans_by_fragment.get(fragment.block.block_id, ()):
+                start = fragment.offset + span.start
+                end = fragment.offset + span.end
+                identity = (fragment.original_block_id, span.entity_type, start, end)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                result[fragment.original_block_id].append(
+                    EntitySpan(
+                        entity_type=span.entity_type,
+                        text=span.text,
+                        start=start,
+                        end=end,
+                        source=span.source,
+                        confidence=span.confidence,
+                        party_role=span.party_role,
+                    )
+                )
+    for spans in result.values():
+        spans.sort(key=lambda span: (span.start, span.end, span.entity_type.value))
+    return dict(result)
 
 
 async def detect_all(
     blocks: list[TextBlock],
     requested_types: Sequence[EntityType],
     llm_client: BaseLLMClient,
+    cancel_check: Callable[[], None] | None = None,
 ) -> dict[str, list[Match]]:
     """Найти сущности во всех блоках и подготовить команды замены."""
 
@@ -137,16 +311,23 @@ async def detect_all(
         )
 
     if llm_types:
-        semaphore = asyncio.Semaphore(LLM_MAX_CONCURRENCY)
-        llm_jobs = [
-            (index, _find_llm_entities(block, llm_types, llm_client, semaphore))
-            for index, block in enumerate(blocks)
-            if block.text.strip()
-        ]
-        if llm_jobs:
-            llm_results = await asyncio.gather(*(job for _, job in llm_jobs))
+        nonempty = [block for block in blocks if block.text.strip()]
+        fragments = _fragment_blocks(nonempty, llm_client.batch_max_chars)
+        if fragments:
+            llm_results = await _find_llm_entities_adaptively(
+                fragments,
+                llm_types,
+                llm_client,
+                cancel_check,
+            )
+            if cancel_check is not None:
+                cancel_check()
             allowed_llm_types = set(llm_types)
-            for (index, _), spans in zip(llm_jobs, llm_results):
+            block_indexes = {block.block_id: index for index, block in enumerate(blocks)}
+            for block_id, spans in llm_results.items():
+                index = block_indexes.get(block_id)
+                if index is None:
+                    continue
                 block = blocks[index]
                 candidates_by_index[index].extend(
                     _Candidate(span=span, is_rule_based=False)
@@ -170,7 +351,7 @@ async def detect_all(
             if replacement is None:
                 counters[span.entity_type] += 1
                 replacement = (
-                    f"[{span.entity_type.value.upper()}_{counters[span.entity_type]}]"
+                    f"[{ENTITY_MARKER_PREFIXES[span.entity_type]}_{counters[span.entity_type]}]"
                 )
                 replacements[replacement_key] = replacement
 
@@ -185,6 +366,7 @@ async def detect_all(
                     source=span.source,
                     confidence=span.confidence,
                     location=block.location,
+                    party_role=span.party_role,
                 )
             )
         result[block.block_id] = block_matches

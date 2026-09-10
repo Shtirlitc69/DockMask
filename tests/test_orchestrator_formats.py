@@ -40,7 +40,7 @@ async def test_docx_pipeline_outputs_document_and_two_reports(tmp_path: Path) ->
     assert result.output_document and result.report and result.xlsx_report
     redacted = Document(result.output_document)
     assert "+7 999 123-45-67" not in redacted.paragraphs[0].text
-    assert "[PHONE_1]" in redacted.paragraphs[0].text
+    assert "[ТЕЛЕФОН_1]" in redacted.paragraphs[0].text
     assert len(json.loads(Path(result.report).read_text(encoding="utf-8"))) == 1
     workbook = load_workbook(result.xlsx_report)
     assert workbook.active.max_row == 2
@@ -61,7 +61,7 @@ async def test_xlsx_pipeline_keeps_formula_and_redacts_text(tmp_path: Path) -> N
 
     assert result.status is JobStatus.DONE
     redacted = load_workbook(result.output_document, data_only=False)
-    assert redacted.active["A1"].value == "[EMAIL_1]"
+    assert redacted.active["A1"].value == "[ЭЛЕКТРОННАЯ_ПОЧТА_1]"
     assert redacted.active["B1"].value == "=1+1"
     redacted.close()
 
@@ -82,7 +82,7 @@ async def test_text_pdf_pipeline_performs_real_redaction(tmp_path: Path) -> None
     text = "".join(page.get_text() for page in redacted)
     redacted.close()
     assert "email@example.test" not in text
-    assert "[EMAIL_1]" in text
+    assert "[ЭЛЕКТРОННАЯ_ПОЧТА_1]" in text
 
 
 @pytest.mark.asyncio
@@ -134,7 +134,7 @@ async def test_bundled_tesseract_ocr_redacts_scanned_pdf(tmp_path: Path) -> None
     assert result.status is JobStatus.DONE
     assert [match.text for match in result.matches] == ["email@example.test"]
     output = fitz.open(result.output_document)
-    assert "[EMAIL_1]" in output[0].get_text()
+    assert "[ЭЛЕКТРОННАЯ_ПОЧТА_1]" in output[0].get_text()
     output.close()
 
 

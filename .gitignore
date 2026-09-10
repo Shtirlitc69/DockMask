@@ -19,6 +19,12 @@ frontend/dist/
 
 # App runtime
 storage/files/*
+app/static/js/*
+!app/static/js/.gitkeep
+
+# Local working dirs (build/test artifacts)
+.artifact_work/
+.pytest_tmp/
 !storage/files/.gitkeep
 app/static/css/*
 !app/static/css/.gitkeep

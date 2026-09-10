@@ -10,12 +10,15 @@ from typing import Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from core.models import EntitySpan, EntityType, PartyRole
+from core.models import EntitySpan, EntityType, PartyRole, TextBlock
 from llm.base import BaseLLMClient
 from llm.prompts import (
+    BATCH_ENTITY_SYSTEM_PROMPT,
     ENTITY_SYSTEM_PROMPT,
     PARTY_SYSTEM_PROMPT,
     ROLE_RESPONSE_SCHEMA,
+    block_entity_response_schema,
+    build_block_entity_prompt,
     build_entity_prompt,
     build_party_prompt,
     entity_response_schema,
@@ -34,12 +37,28 @@ class EntityItem(BaseModel):
 
     type: str
     text: str
+    party_role: Literal["supplier", "buyer", "unknown"] = "unknown"
 
 
 class EntitiesResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     entities: list[EntityItem]
+
+
+class BlockEntityItem(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    block_id: int
+    type: str
+    text: str
+    party_role: Literal["supplier", "buyer", "unknown"]
+
+
+class BlockEntitiesResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    entities: list[BlockEntityItem]
 
 
 class RoleResponse(BaseModel):
@@ -115,6 +134,7 @@ def to_entity_spans(
                     end=match.end(),
                     source=source,
                     confidence=confidence,
+                    party_role=PartyRole(entity.party_role),
                 )
             )
     return sorted(spans, key=lambda span: (span.start, span.end, span.entity_type.value))
@@ -125,6 +145,9 @@ class StructuredLLMClient(BaseLLMClient):
 
     source = "llm"
     confidence = 0.8
+    batch_max_chars = 24_000
+    batch_max_concurrency = 1
+    provides_inline_roles = True
 
     async def find_entities(
         self,
@@ -162,6 +185,69 @@ class StructuredLLMClient(BaseLLMClient):
         )
         role = PartyRole(parse_model_json(content, RoleResponse).role)
         return None if role is PartyRole.UNKNOWN else role
+
+    async def find_entities_in_blocks(
+        self,
+        blocks: Sequence[TextBlock],
+        types: Sequence[EntityType],
+    ) -> dict[str, list[EntitySpan]]:
+        requested = frozenset(types)
+        result = {block.block_id: [] for block in blocks}
+        if not blocks or not requested:
+            return result
+
+        indexed = list(enumerate(blocks))
+        content = await self._complete(
+            build_block_entity_prompt(
+                [(index, block.text) for index, block in indexed],
+                requested,
+            ),
+            block_entity_response_schema(
+                [index for index, _ in indexed],
+                requested,
+            ),
+            system_prompt=BATCH_ENTITY_SYSTEM_PROMPT,
+        )
+        payload = parse_model_json(content, BlockEntitiesResponse)
+        by_index = {index: block for index, block in indexed}
+        seen: set[tuple[int, EntityType, int, int]] = set()
+        for entity in payload.entities:
+            block = by_index.get(entity.block_id)
+            if block is None:
+                LOGGER.warning("LLM returned an unknown block id")
+                continue
+            try:
+                entity_type = EntityType(entity.type)
+            except ValueError:
+                LOGGER.warning("LLM returned an unknown entity type")
+                continue
+            if entity_type not in requested or not entity.text:
+                LOGGER.warning("LLM returned an invalid batch entity")
+                continue
+            start = 0
+            while True:
+                start = block.text.find(entity.text, start)
+                if start < 0:
+                    break
+                end = start + len(entity.text)
+                identity = (entity.block_id, entity_type, start, end)
+                if identity not in seen:
+                    seen.add(identity)
+                    result[block.block_id].append(
+                        EntitySpan(
+                            entity_type=entity_type,
+                            text=entity.text,
+                            start=start,
+                            end=end,
+                            source=self.source,
+                            confidence=self.confidence,
+                            party_role=PartyRole(entity.party_role),
+                        )
+                    )
+                start = end
+        for spans in result.values():
+            spans.sort(key=lambda span: (span.start, span.end, span.entity_type.value))
+        return result
 
     @abstractmethod
     async def _complete(

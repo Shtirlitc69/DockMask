@@ -34,6 +34,7 @@ class OpenAICompatibleClient(StructuredLLMClient):
     """Use the OpenAI Chat Completions wire protocol."""
 
     source = "openai-compatible"
+    provider_name = "openai_compatible"
 
     def __init__(
         self,

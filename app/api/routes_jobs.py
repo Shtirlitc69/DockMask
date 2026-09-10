@@ -14,6 +14,7 @@ from app.dependencies import (
     JobService,
     JobStateError,
     ModelDiscoveryError,
+    PreviewUnavailableError,
     ServiceUnavailableError,
     get_config_service,
     get_health_service,
@@ -31,6 +32,7 @@ from app.schemas import (
     JobStatusResponse,
     ModelsRequest,
     ModelsResponse,
+    PreviewResponse,
     ReportResponse,
 )
 from core.models import DocumentFormat, EntityType
@@ -257,6 +259,39 @@ async def get_report(
         raise _api_error(status.HTTP_409_CONFLICT, "result_not_ready") from None
     except ServiceUnavailableError as exc:
         _raise_service_error(exc)
+
+
+@router.get("/jobs/{job_id}/preview", response_model=PreviewResponse)
+async def get_preview(
+    job_id: str,
+    service: JobServiceDependency,
+) -> PreviewResponse:
+    try:
+        return await service.get_preview(job_id)
+    except JobNotFoundError:
+        raise _api_error(status.HTTP_404_NOT_FOUND, "job_not_found") from None
+    except JobStateError:
+        raise _api_error(status.HTTP_409_CONFLICT, "result_not_ready") from None
+    except PreviewUnavailableError:
+        raise _api_error(status.HTTP_500_INTERNAL_SERVER_ERROR, "preview_unavailable") from None
+    except ServiceUnavailableError as exc:
+        _raise_service_error(exc)
+
+
+@router.get("/jobs/{job_id}/report.json")
+async def get_json_report(
+    job_id: str,
+    service: JobServiceDependency,
+) -> FileResponse:
+    return await _artifact_response(job_id, "json_report", service)
+
+
+@router.get("/jobs/{job_id}/report.csv")
+async def get_csv_report(
+    job_id: str,
+    service: JobServiceDependency,
+) -> FileResponse:
+    return await _artifact_response(job_id, "csv_report", service)
 
 
 @router.get("/jobs/{job_id}/report.xlsx")

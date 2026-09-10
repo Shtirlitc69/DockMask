@@ -28,6 +28,7 @@ class OllamaClient(StructuredLLMClient):
     """Use Ollama's native non-streaming chat and model APIs."""
 
     source = "ollama"
+    provider_name = "ollama"
 
     def __init__(
         self,

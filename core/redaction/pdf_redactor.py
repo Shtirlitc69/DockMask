@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
+import os
 from collections import defaultdict
 from pathlib import Path
 
 import fitz
 
 from core.models import Match
+
+
+def _cyrillic_font_path() -> Path:
+    fonts = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
+    for name in ("arial.ttf", "segoeui.ttf"):
+        candidate = fonts / name
+        if candidate.is_file():
+            return candidate
+    raise RuntimeError("cyrillic_pdf_font_unavailable")
 
 
 def redact_pdf(
@@ -24,6 +34,7 @@ def redact_pdf(
     try:
         occurrences: defaultdict[tuple[int, str], int] = defaultdict(int)
         touched_pages: set[int] = set()
+        replacements: defaultdict[int, list[tuple[fitz.Rect, str]]] = defaultdict(list)
         for block_id, matches in matches_by_block.items():
             for match in sorted(matches, key=lambda item: (item.start, item.end)):
                 location = match.location
@@ -43,13 +54,10 @@ def redact_pdf(
                         candidate |= word_rect
                     page.add_redact_annot(
                         candidate,
-                        text=match.replacement,
-                        fontname="helv",
-                        fontsize=8,
                         fill=(1, 1, 0.55),
-                        text_color=(0, 0, 0),
                         cross_out=False,
                     )
+                    replacements[location.page_number].append((candidate, match.replacement))
                     touched_pages.add(location.page_number)
                     match.applied = True
                     continue
@@ -64,17 +72,32 @@ def redact_pdf(
                     continue
                 page.add_redact_annot(
                     candidates[index],
-                    text=match.replacement,
-                    fontname="helv",
-                    fontsize=8,
                     fill=(1, 1, 0.55),
-                    text_color=(0, 0, 0),
                     cross_out=False,
+                )
+                replacements[location.page_number].append(
+                    (candidates[index], match.replacement)
                 )
                 touched_pages.add(location.page_number)
                 match.applied = True
+        font_path = _cyrillic_font_path() if replacements else None
+        font = fitz.Font(fontfile=str(font_path)) if font_path else None
         for page_number in touched_pages:
-            document[page_number].apply_redactions()
+            page = document[page_number]
+            page.apply_redactions()
+            for rect, replacement in replacements[page_number]:
+                assert font is not None and font_path is not None
+                unit_width = max(font.text_length(replacement, fontsize=1), 1)
+                font_size = min(8.0, max(3.0, rect.width / unit_width * 0.95))
+                page.insert_textbox(
+                    rect,
+                    replacement,
+                    fontname="dockmask",
+                    fontfile=str(font_path),
+                    fontsize=font_size,
+                    color=(0, 0, 0),
+                    overlay=True,
+                )
         target.parent.mkdir(parents=True, exist_ok=True)
         document.save(target, garbage=4, deflate=True)
     finally:

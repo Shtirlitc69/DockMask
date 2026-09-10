@@ -37,6 +37,9 @@ uv run ruff check .
 Assert-LastExitCode "Backend lint"
 uv lock --check
 Assert-LastExitCode "Lockfile validation"
+Get-Process -Name DockMask -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 500
+
 uv run pyinstaller --noconfirm --clean --distpath output/exe --workpath tmp/pyinstaller DockMask.spec
 Assert-LastExitCode "PyInstaller build"
 

@@ -48,10 +48,48 @@ class EntityType(str, Enum):
     CONTRACT_NUMBER = "contract_number"
 
 
+ENTITY_MARKER_PREFIXES: dict[EntityType, str] = {
+    EntityType.PERSON_NAME: "ФИО",
+    EntityType.ORGANIZATION: "ОРГАНИЗАЦИЯ",
+    EntityType.ADDRESS: "АДРЕС",
+    EntityType.AMOUNT: "СУММА",
+    EntityType.INN: "ИНН",
+    EntityType.KPP: "КПП",
+    EntityType.OGRN: "ОГРН",
+    EntityType.PHONE: "ТЕЛЕФОН",
+    EntityType.EMAIL: "ЭЛЕКТРОННАЯ_ПОЧТА",
+    EntityType.BANK_ACCOUNT: "РАСЧЁТНЫЙ_СЧЁТ",
+    EntityType.BIK: "БИК",
+    EntityType.CONTRACT_NUMBER: "НОМЕР_ДОГОВОРА",
+}
+
+ENTITY_DISPLAY_NAMES: dict[EntityType, str] = {
+    EntityType.PERSON_NAME: "ФИО",
+    EntityType.ORGANIZATION: "Организация",
+    EntityType.ADDRESS: "Адрес",
+    EntityType.AMOUNT: "Сумма",
+    EntityType.INN: "ИНН",
+    EntityType.KPP: "КПП",
+    EntityType.OGRN: "ОГРН",
+    EntityType.PHONE: "Телефон",
+    EntityType.EMAIL: "Электронная почта",
+    EntityType.BANK_ACCOUNT: "Расчётный счёт",
+    EntityType.BIK: "БИК",
+    EntityType.CONTRACT_NUMBER: "Номер договора",
+}
+
+
 class PartyRole(str, Enum):
     SUPPLIER = "supplier"
     BUYER = "buyer"
     UNKNOWN = "unknown"
+
+
+PARTY_ROLE_DISPLAY_NAMES: dict[PartyRole, str] = {
+    PartyRole.SUPPLIER: "Поставщик",
+    PartyRole.BUYER: "Покупатель",
+    PartyRole.UNKNOWN: "Не определено",
+}
 
 
 @dataclass(slots=True, frozen=True)
@@ -107,6 +145,7 @@ class EntitySpan:
     end: int
     source: str = "llm"
     confidence: float = 0.8
+    party_role: PartyRole = PartyRole.UNKNOWN
 
     def __post_init__(self) -> None:
         _validate_span(self.text, self.start, self.end, self.confidence)

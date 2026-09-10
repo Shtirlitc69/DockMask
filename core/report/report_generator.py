@@ -11,7 +11,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from core.models import Location, Match
+from core.models import ENTITY_DISPLAY_NAMES, PARTY_ROLE_DISPLAY_NAMES, Location, Match
 
 REPORT_COLUMNS = (
     "№",
@@ -150,10 +150,10 @@ class ReportGenerator:
             sheet.append(
                 (
                     number,
-                    match.entity_type.value,
+                    ENTITY_DISPLAY_NAMES[match.entity_type],
                     match.text,
                     match.replacement,
-                    match.party_role.value,
+                    PARTY_ROLE_DISPLAY_NAMES[match.party_role],
                     match.source,
                     match.confidence,
                     format_location(match.location),

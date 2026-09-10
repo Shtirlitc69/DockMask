@@ -13,7 +13,8 @@ from uuid import UUID
 
 import httpx
 
-from core.models import EntityType, PartyRole
+from core.detectors.entity_detector import detect_all
+from core.models import BlockKind, EntityType, Location, PartyRole, TextBlock
 from llm.base import BaseLLMClient
 from llm.gigachat_client import (
     GigaChatClient,
@@ -21,6 +22,7 @@ from llm.gigachat_client import (
     GigaChatHTTPError,
     LLMResponseError,
 )
+from llm.http_utils import LLMContextLimitError
 
 AUTH_KEY = "test-auth-key-do-not-log"
 ACCESS_TOKEN = "test-access-token-do-not-log"
@@ -73,6 +75,44 @@ class GigaChatClientTests(unittest.IsolatedAsyncioTestCase):
     async def test_implements_base_contract(self) -> None:
         client = self.make_client(lambda request: token_response(request))
         self.assertIsInstance(client, BaseLLMClient)
+
+    async def test_batches_many_blocks_into_one_sequential_chat_request(self) -> None:
+        oauth_calls = 0
+        chat_calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal oauth_calls, chat_calls
+            if request.url.path == "/api/v2/oauth":
+                oauth_calls += 1
+                return token_response(request)
+            chat_calls += 1
+            return chat_response(
+                request,
+                entities_content(
+                    {
+                        "block_id": 0,
+                        "type": "organization",
+                        "text": "ООО Тест",
+                        "party_role": "supplier",
+                    }
+                ),
+            )
+
+        client = self.make_client(handler)
+        blocks = [
+            TextBlock(
+                block_id=f"p:{index}",
+                text="ООО Тест" if index == 0 else f"Обычный текст {index}",
+                kind=BlockKind.DOCX_PARAGRAPH,
+                location=Location(paragraph_index=index),
+            )
+            for index in range(100)
+        ]
+        result = await detect_all(blocks, [EntityType.ORGANIZATION], client)
+
+        self.assertEqual(oauth_calls, 1)
+        self.assertEqual(chat_calls, 1)
+        self.assertEqual(result["p:0"][0].party_role, PartyRole.SUPPLIER)
 
     async def test_lists_only_chat_models_with_cached_oauth_token(self) -> None:
         oauth_calls = 0
@@ -240,7 +280,7 @@ class GigaChatClientTests(unittest.IsolatedAsyncioTestCase):
             return chat_response(request, entities_content())
 
         client = self.make_client(handler)
-        with patch("llm.gigachat_client.asyncio.sleep", new=AsyncMock()):
+        with patch("llm.http_utils.asyncio.sleep", new=AsyncMock()):
             await client.find_entities("Текст", [EntityType.PERSON_NAME])
 
         self.assertEqual(oauth_calls, 2)
@@ -303,11 +343,27 @@ class GigaChatClientTests(unittest.IsolatedAsyncioTestCase):
 
                 client = self.make_client(handler)
                 with patch(
-                    "llm.gigachat_client.asyncio.sleep",
+                    "llm.http_utils.asyncio.sleep",
                     new=AsyncMock(),
                 ):
                     await client.find_entities("Текст", [EntityType.PERSON_NAME])
                 self.assertEqual(chat_calls, 2)
+
+    async def test_context_limit_is_not_retried(self) -> None:
+        chat_calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal chat_calls
+            if request.url.path == "/api/v2/oauth":
+                return token_response(request)
+            chat_calls += 1
+            return httpx.Response(413, request=request)
+
+        client = self.make_client(handler)
+        with self.assertRaises(LLMContextLimitError):
+            await client.find_entities("Текст", [EntityType.PERSON_NAME])
+
+        self.assertEqual(chat_calls, 1)
 
     async def test_timeout_and_connection_errors_stop_after_three_attempts(self) -> None:
         for error_type in (httpx.ReadTimeout, httpx.ConnectError):
@@ -330,7 +386,7 @@ class GigaChatClientTests(unittest.IsolatedAsyncioTestCase):
                 client = self.make_client(handler)
                 sleep_mock = AsyncMock()
                 with patch(
-                    "llm.gigachat_client.asyncio.sleep",
+                    "llm.http_utils.asyncio.sleep",
                     new=sleep_mock,
                 ), self.assertRaises(GigaChatError):
                     await client.find_entities(
@@ -455,7 +511,7 @@ class GigaChatClientTests(unittest.IsolatedAsyncioTestCase):
             )
 
         client = self.make_client(handler)
-        with self.assertLogs("llm.gigachat_client", logging.WARNING) as logs:
+        with self.assertLogs("llm.structured", logging.WARNING) as logs:
             spans = await client.find_entities(
                 "В документе нет совпадений",
                 [EntityType.PERSON_NAME],
@@ -535,7 +591,7 @@ class GigaChatClientTests(unittest.IsolatedAsyncioTestCase):
             )
 
         client = self.make_client(warning_handler)
-        with self.assertLogs("llm.gigachat_client", logging.WARNING) as logs:
+        with self.assertLogs("llm.structured", logging.WARNING) as logs:
             await client.find_entities("Другой текст", [EntityType.PERSON_NAME])
         logged = "\n".join(logs.output)
         for secret in (AUTH_KEY, ACCESS_TOKEN, secret_model_value):

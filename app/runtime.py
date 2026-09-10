@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import json
 import logging
+import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -23,6 +26,7 @@ from app.dependencies import (
     JobNotFoundError,
     JobStateError,
     ModelDiscoveryError,
+    PreviewUnavailableError,
     ServiceUnavailableError,
 )
 from app.schemas import (
@@ -39,6 +43,7 @@ from app.schemas import (
     ModelResponse,
     ModelsRequest,
     ModelsResponse,
+    PreviewResponse,
     ProviderResponse,
     QuestionResponse,
     ReplacementResponse,
@@ -46,8 +51,19 @@ from app.schemas import (
 )
 from core.config import Settings
 from core.extractors.ocr.tesseract_provider import TesseractOcrProvider
-from core.models import DocumentFormat, EntityType, JobStatus, Location, Match, PartyRole
+from core.models import (
+    ENTITY_DISPLAY_NAMES,
+    PARTY_ROLE_DISPLAY_NAMES,
+    DocumentFormat,
+    EntityType,
+    JobStatus,
+    Location,
+    Match,
+    PartyRole,
+)
 from core.orchestrator import PipelineCancelled, run_pipeline
+from core.preview import build_preview
+from core.report.report_generator import format_location
 from llm import (
     GigaChatScope,
     LLMClientConfig,
@@ -75,6 +91,45 @@ RECOMMENDED_MODELS: dict[ProviderId, list[str]] = {
     ProviderId.VLLM: [],
 }
 LOGGER = logging.getLogger(__name__)
+
+
+def _write_csv_report(json_path: Path, csv_path: Path) -> None:
+    values = json.loads(json_path.read_text(encoding="utf-8"))
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8-sig",
+            newline="",
+            dir=csv_path.parent,
+            prefix=".report-",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            writer = csv.writer(handle)
+            writer.writerow(
+                ("№", "Тип данных", "Исходный текст", "Маркер", "Роль", "Уверенность", "Расположение")
+            )
+            for index, item in enumerate(values, start=1):
+                entity_type = EntityType(item["entity_type"])
+                party_role = PartyRole(item.get("party_role", PartyRole.UNKNOWN.value))
+                writer.writerow(
+                    (
+                        index,
+                        ENTITY_DISPLAY_NAMES[entity_type],
+                        item["original_value"],
+                        item["replacement"],
+                        PARTY_ROLE_DISPLAY_NAMES[party_role],
+                        item["confidence"],
+                        format_location(Location(**item.get("location", {}))),
+                    )
+                )
+        os.replace(temporary, csv_path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _serialize_matches(matches: list[Match]) -> list[dict[str, object]]:
@@ -503,18 +558,47 @@ class RuntimeJobService:
         record = await self._require(job_id)
         if record.status is not JobStatus.DONE:
             raise JobStateError
+        stem = Path(record.source_filename).stem
+        suffix = Path(record.source_filename).suffix.lower()
+        document_media_types = {
+            ".pdf": "application/pdf",
+            ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        }
+        csv_path = (
+            Path(record.json_report_path).with_suffix(".csv")
+            if record.json_report_path
+            else None
+        )
+        if kind == "csv_report" and record.json_report_path and csv_path:
+            try:
+                await asyncio.to_thread(
+                    _write_csv_report,
+                    Path(record.json_report_path),
+                    csv_path,
+                )
+            except (OSError, ValueError, TypeError, KeyError):
+                raise JobStateError from None
         mapping = {
             "document": (
                 record.output_path,
-                "application/octet-stream",
-                f"{Path(record.source_filename).stem}.redacted{Path(record.source_filename).suffix}",
+                document_media_types.get(suffix, "application/octet-stream"),
+                f"{stem}_обезличенный{suffix}",
             ),
+            "json_report": (
+                record.json_report_path,
+                "application/json",
+                f"{stem}_отчёт.json",
+            ),
+            "csv_report": (csv_path, "text/csv; charset=utf-8", f"{stem}_отчёт.csv"),
             "xlsx_report": (
                 record.xlsx_report_path,
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                f"{Path(record.source_filename).stem}.report.xlsx",
+                f"{stem}_отчёт.xlsx",
             ),
         }
+        if kind not in mapping:
+            raise JobStateError
         path_value, media_type, filename = mapping[kind]
         if not path_value or not Path(path_value).is_file():
             raise JobStateError
@@ -531,6 +615,25 @@ class RuntimeJobService:
         except (OSError, ValueError, TypeError):
             raise JobStateError from None
         return ReportResponse(total_replacements=len(replacements), replacements=replacements)
+
+    async def get_preview(self, job_id: str) -> PreviewResponse:
+        record = await self._require(job_id)
+        if record.status is not JobStatus.DONE or not record.output_path:
+            raise JobStateError
+        report = await self.get_report(job_id)
+        try:
+            elements, truncated = await asyncio.to_thread(
+                build_preview,
+                record.output_path,
+                [item.replacement for item in report.replacements],
+            )
+            return PreviewResponse(
+                format=record.document_format,
+                elements=elements,
+                truncated=truncated,
+            )
+        except (OSError, ValueError, TypeError):
+            raise PreviewUnavailableError from None
 
 
 class RuntimeHealthService:
@@ -627,21 +730,43 @@ async def create_runtime(
 
                 try:
                     client = await config_service.client_for(record)
-                    result = await run_pipeline(
-                        record.input_path,
-                        files.job_dir(job_id),
-                        record.entity_types,
-                        client,
-                        answers=record.answers,
-                        prepared_matches=(
-                            _deserialize_matches(record.pending_matches)
-                            if record.pending_matches
-                            else None
+                    pipeline_task = asyncio.create_task(
+                        run_pipeline(
+                            record.input_path,
+                            files.job_dir(job_id),
+                            record.entity_types,
+                            client,
+                            answers=record.answers,
+                            prepared_matches=(
+                                _deserialize_matches(record.pending_matches)
+                                if record.pending_matches
+                                else None
+                            ),
+                            use_ocr=True,
+                            ocr_provider=ocr_provider,
+                            cancel_check=check_cancelled,
                         ),
-                        use_ocr=True,
-                        ocr_provider=ocr_provider,
-                        cancel_check=check_cancelled,
+                        name=f"dockmask-pipeline-{job_id}",
                     )
+                    cancel_task = asyncio.create_task(
+                        cancel_event.wait(),
+                        name=f"dockmask-cancel-{job_id}",
+                    )
+                    try:
+                        done, _ = await asyncio.wait(
+                            {pipeline_task, cancel_task},
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if cancel_task in done:
+                            raise PipelineCancelled
+                        result = await pipeline_task
+                    finally:
+                        cancel_task.cancel()
+                        if not pipeline_task.done():
+                            pipeline_task.cancel()
+                        await asyncio.gather(
+                            pipeline_task, cancel_task, return_exceptions=True
+                        )
                 except PipelineCancelled:
                     continue
                 except (ValueError, ServiceUnavailableError):

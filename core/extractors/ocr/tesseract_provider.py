@@ -10,9 +10,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from collections import defaultdict
 from collections.abc import Callable
+from functools import cached_property
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
@@ -129,8 +131,16 @@ def _runtime_root() -> Path | None:
 
 class TesseractOcrProvider:
     def __init__(self, runtime_root: str | Path | None = None, *, dpi: int = 300) -> None:
-        self.runtime_root = Path(runtime_root).resolve() if runtime_root else _runtime_root()
+        self._configured_root = Path(runtime_root).resolve() if runtime_root else None
         self.dpi = dpi
+
+    @cached_property
+    def runtime_root(self) -> Path | None:
+        started = time.monotonic()
+        try:
+            return self._configured_root or _runtime_root()
+        finally:
+            logger.info("ocr_runtime_prepare seconds=%.3f", time.monotonic() - started)
 
     @property
     def available(self) -> bool:
