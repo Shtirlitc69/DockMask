@@ -161,3 +161,45 @@ async def test_clarification_resumes_without_second_llm_call(tmp_path: Path) -> 
 
     assert second.status is JobStatus.DONE
     assert (client.entity_calls, client.party_calls) == calls
+
+
+@pytest.mark.asyncio
+async def test_clarification_contains_context_and_groups_repeated_entity(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.docx"
+    document = Document()
+    document.add_paragraph("Реквизиты: ООО Тест")
+    document.add_paragraph("Подпись: ООО Тест")
+    document.save(source)
+
+    first = await run_pipeline(
+        source,
+        tmp_path / "result",
+        [EntityType.ORGANIZATION],
+        MockLLMClient(),
+    )
+
+    assert first.status is JobStatus.NEEDS_CLARIFICATION
+    assert len(first.open_questions) == 1
+    question = first.open_questions[0]
+    assert question.context_text == "Реквизиты: ООО Тест"
+    assert question.context_location == "Абзац 1"
+    assert question.highlight_start is not None
+    assert question.highlight_end is not None
+    assert (
+        question.context_text[question.highlight_start : question.highlight_end]
+        == "ООО Тест"
+    )
+
+    second = await run_pipeline(
+        source,
+        tmp_path / "result",
+        [EntityType.ORGANIZATION],
+        MockLLMClient(),
+        answers={question.question_id: "buyer"},
+        prepared_matches=first.matches,
+    )
+
+    assert second.status is JobStatus.DONE
+    assert {match.party_role.value for match in second.matches} == {"buyer"}

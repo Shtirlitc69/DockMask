@@ -24,11 +24,12 @@ from core.models import (
     Match,
     PartyRole,
     PipelineResult,
+    TextBlock,
 )
 from core.redaction.docx_redactor import redact_docx
 from core.redaction.pdf_redactor import redact_pdf
 from core.redaction.xlsx_redactor import redact_xlsx
-from core.report.report_generator import ReportGenerator, generate_report
+from core.report.report_generator import ReportGenerator, format_location, generate_report
 from llm.base import BaseLLMClient
 from llm.http_utils import LLMContextLimitError, LLMHTTPError, LLMProviderError
 from llm.structured import LLMResponseError
@@ -82,7 +83,7 @@ def _flatten_matches(matches_by_block: Mapping[str, Iterable[Match]]) -> list[Ma
 
 
 def _question_id(match: Match) -> str:
-    return f"party:{match.block_id}:{match.start}:{match.end}"
+    return f"party:{match.entity_type.value}:{match.replacement}"
 
 
 def _apply_answers(
@@ -103,20 +104,53 @@ def _apply_answers(
 def _role_questions(
     matches_by_block: Mapping[str, Iterable[Match]],
     answered: set[str],
+    blocks: Iterable[TextBlock],
 ) -> list[ClarifyingQuestion]:
     questions: list[ClarifyingQuestion] = []
+    blocks_by_id = {block.block_id: block for block in blocks}
+    added: set[str] = set()
     for match in _flatten_matches(matches_by_block):
         if match.entity_type not in {EntityType.ORGANIZATION, EntityType.PERSON_NAME}:
             continue
         question_id = _question_id(match)
-        if match.party_role is not PartyRole.UNKNOWN or question_id in answered:
+        if (
+            match.party_role is not PartyRole.UNKNOWN
+            or question_id in answered
+            or question_id in added
+        ):
             continue
+        added.add(question_id)
+        block = blocks_by_id.get(match.block_id)
+        context_text: str | None = None
+        highlight_start: int | None = None
+        highlight_end: int | None = None
+        if block is not None:
+            line_start = block.text.rfind("\n", 0, match.start) + 1
+            line_end = block.text.find("\n", match.end)
+            if line_end < 0:
+                line_end = len(block.text)
+            raw_line = block.text[line_start:line_end]
+            leading_spaces = len(raw_line) - len(raw_line.lstrip())
+            context_text = raw_line.strip()
+            highlight_start = match.start - line_start - leading_spaces
+            highlight_end = match.end - line_start - leading_spaces
+            if not (
+                context_text
+                and 0 <= highlight_start < highlight_end <= len(context_text)
+            ):
+                context_text = block.text
+                highlight_start = match.start
+                highlight_end = match.end
         questions.append(
             ClarifyingQuestion(
-                question=f"Укажите роль найденной стороны для замены {match.replacement}.",
+                question=f"Определите роль стороны «{match.text}» ({match.replacement}).",
                 related_entity_type=match.entity_type,
                 question_id=question_id,
                 options=tuple(item.value for item in PartyRole),
+                context_text=context_text,
+                context_location=format_location(match.location),
+                highlight_start=highlight_start,
+                highlight_end=highlight_end,
             )
         )
     return questions
@@ -187,7 +221,7 @@ async def run_pipeline(
             for match in prepared_matches:
                 matches_by_block.setdefault(match.block_id, []).append(match)
         answered = _apply_answers(matches_by_block, answers or {})
-        questions = _role_questions(matches_by_block, answered)
+        questions = _role_questions(matches_by_block, answered, extracted.blocks)
         if questions:
             return PipelineResult(
                 status=JobStatus.NEEDS_CLARIFICATION,

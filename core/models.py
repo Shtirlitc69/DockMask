@@ -192,10 +192,21 @@ class ClarifyingQuestion:
     question_id: str = field(default_factory=lambda: str(uuid4()))
     answer: str | None = None
     options: tuple[str, ...] = ()
+    context_text: str | None = None
+    context_location: str | None = None
+    highlight_start: int | None = None
+    highlight_end: int | None = None
 
     def __post_init__(self) -> None:
         if not self.question:
             raise ValueError("question не может быть пустым")
+        if (self.highlight_start is None) != (self.highlight_end is None):
+            raise ValueError("границы подсветки должны задаваться вместе")
+        if self.highlight_start is not None and self.highlight_end is not None:
+            if not self.context_text:
+                raise ValueError("для подсветки требуется текст контекста")
+            if not 0 <= self.highlight_start < self.highlight_end <= len(self.context_text):
+                raise ValueError("границы подсветки выходят за текст контекста")
 
 
 @dataclass(slots=True)

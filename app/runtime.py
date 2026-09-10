@@ -786,6 +786,10 @@ async def create_runtime(
                                 item.related_entity_type.value if item.related_entity_type else None
                             ),
                             "options": list(item.options),
+                            "context_text": item.context_text,
+                            "context_location": item.context_location,
+                            "highlight_start": item.highlight_start,
+                            "highlight_end": item.highlight_end,
                         }
                         for item in result.open_questions
                     ]

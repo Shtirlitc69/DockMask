@@ -17,6 +17,7 @@ from app.schemas import (
     HealthResponse,
     JobCreateResponse,
     JobStatusResponse,
+    QuestionResponse,
 )
 from core.models import DocumentFormat, EntityType, JobStatus
 
@@ -189,6 +190,22 @@ def test_job_status_and_not_found() -> None:
     assert response.json()["total_replacements"] == 0
     assert missing.status_code == 404
     assert missing.json() == {"detail": "job_not_found"}
+
+
+def test_old_question_payload_remains_compatible() -> None:
+    question = QuestionResponse.model_validate(
+        {
+            "question_id": "question-1",
+            "question": "Укажите роль",
+            "related_entity_type": "organization",
+            "options": ["supplier", "buyer", "unknown"],
+        }
+    )
+
+    assert question.context_text is None
+    assert question.context_location is None
+    assert question.highlight_start is None
+    assert question.highlight_end is None
 
 
 def test_job_can_be_cancelled_and_cancel_is_idempotent() -> None:

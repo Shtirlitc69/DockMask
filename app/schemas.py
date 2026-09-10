@@ -15,6 +15,10 @@ class QuestionResponse(BaseModel):
     question: str
     related_entity_type: EntityType | None = None
     options: list[str] = Field(default_factory=list)
+    context_text: str | None = None
+    context_location: str | None = None
+    highlight_start: int | None = Field(default=None, ge=0)
+    highlight_end: int | None = Field(default=None, ge=1)
 
 
 class JobAnswer(BaseModel):

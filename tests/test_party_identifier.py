@@ -115,17 +115,17 @@ class PartyIdentifierTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(buyer_match.party_role, PartyRole.BUYER)
         self.assertEqual(client.calls, [])
 
-    async def test_conflicting_current_evidence_stays_unknown_without_llm(self) -> None:
+    async def test_nearest_current_marker_resolves_conflicting_evidence(self) -> None:
         block = self.block(0, "Поставщик и покупатель: ООО Альфа")
         match = self.match(block, "ООО Альфа")
         client = PartyLLMClient(PartyRole.SUPPLIER)
 
         await identify_parties([block], {block.block_id: [match]}, client)
 
-        self.assertEqual(match.party_role, PartyRole.UNKNOWN)
+        self.assertEqual(match.party_role, PartyRole.BUYER)
         self.assertEqual(client.calls, [])
 
-    async def test_conflicting_neighbors_stay_unknown_without_llm(self) -> None:
+    async def test_conflicting_neighbors_fall_back_to_llm(self) -> None:
         previous = self.block(0, "Поставщик")
         candidate = self.block(1, "ООО Альфа")
         following = self.block(2, "Покупатель")
@@ -138,8 +138,36 @@ class PartyIdentifierTests(unittest.IsolatedAsyncioTestCase):
             client,
         )
 
-        self.assertEqual(match.party_role, PartyRole.UNKNOWN)
+        self.assertEqual(match.party_role, PartyRole.SUPPLIER)
+        self.assertEqual(len(client.calls), 1)
+
+    async def test_two_parties_in_one_line_use_their_nearest_markers(self) -> None:
+        block = self.block(
+            0,
+            "Поставщик: ООО Альфа; Покупатель: АО Бета",
+        )
+        supplier = self.match(block, "ООО Альфа")
+        buyer = self.match(block, "АО Бета")
+        client = PartyLLMClient()
+
+        await identify_parties(
+            [block], {block.block_id: [supplier, buyer]}, client
+        )
+
+        self.assertEqual(supplier.party_role, PartyRole.SUPPLIER)
+        self.assertEqual(buyer.party_role, PartyRole.BUYER)
         self.assertEqual(client.calls, [])
+
+    async def test_inline_unknown_still_uses_contextual_llm_fallback(self) -> None:
+        block = self.block(0, "ООО Альфа")
+        match = self.match(block, block.text)
+        client = PartyLLMClient(PartyRole.BUYER)
+        client.provides_inline_roles = True
+
+        await identify_parties([block], {block.block_id: [match]}, client)
+
+        self.assertEqual(match.party_role, PartyRole.BUYER)
+        self.assertEqual(len(client.calls), 1)
 
     async def test_llm_fallback_uses_neighbor_context(self) -> None:
         previous = self.block(0, "Реквизиты сторон")

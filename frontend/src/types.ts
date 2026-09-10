@@ -91,6 +91,12 @@ export interface ClarifyingQuestion {
 
   context: string
 
+  contextLocation?: string
+
+  highlightStart?: number
+
+  highlightEnd?: number
+
   options: string[]
 
   answer?: string

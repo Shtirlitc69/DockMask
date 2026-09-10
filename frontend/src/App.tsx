@@ -494,7 +494,7 @@ export function LocalProviderNotice() {
   )
 }
 
-function SettingsDrawer({
+export function SettingsDrawer({
   open,
   onClose,
 }: {
@@ -508,6 +508,7 @@ function SettingsDrawer({
   const [apiKey, setApiKey] = useState("")
   const [scope, setScope] = useState<GigaChatScope>("GIGACHAT_API_PERS")
   const [models, setModels] = useState<string[]>([])
+  const [modelMenuOpen, setModelMenuOpen] = useState(false)
   const [status, setStatus] = useState<string>("")
   const selected = config?.providers.find((item) => item.id === provider)
 
@@ -555,11 +556,32 @@ function SettingsDrawer({
     setStatus("Проверка подключения…")
     try {
       const result = await apiClient.validateConfig(validationPayload())
-      setStatus(
-        result.ok
-          ? "Подключение проверено."
-          : `Проверка не пройдена: ${result.code}`,
-      )
+      if (!result.ok) {
+        setStatus(`Проверка не пройдена: ${result.code}`)
+        return
+      }
+      if (provider === "mock") {
+        setStatus("Подключение проверено.")
+        return
+      }
+      try {
+        const catalog = await apiClient.listModels({
+          provider,
+          ...(baseUrl ? { base_url: baseUrl } : {}),
+          ...(provider === "gigachat" ? { scope } : {}),
+          ...(apiKey ? { api_key: apiKey } : {}),
+        })
+        setModels(catalog.models.map((item) => item.id))
+        setStatus(
+          catalog.models.length
+            ? "Подключение проверено. Список моделей загружен."
+            : "Подключение проверено. Провайдер не вернул модели; введите ID вручную.",
+        )
+      } catch {
+        setStatus(
+          "Подключение проверено, но список моделей загрузить не удалось. ID можно ввести вручную.",
+        )
+      }
     } catch (error) {
       setStatus(
         `Проверка не выполнена: ${
@@ -579,6 +601,7 @@ function SettingsDrawer({
         ...(apiKey ? { api_key: apiKey } : {}),
       })
       setModels(result.models.map((item) => item.id))
+      setModelMenuOpen(result.models.length > 0)
       setStatus(
         result.models.length
           ? "Список моделей обновлён."
@@ -655,9 +678,21 @@ function SettingsDrawer({
             Провайдер
             <select
               value={provider}
-              onChange={(event) =>
-                setProvider(event.target.value as ProviderId)
-              }
+              onChange={(event) => {
+                const nextProvider = event.target.value as ProviderId
+                const next = config?.providers.find(
+                  (item) => item.id === nextProvider,
+                )
+                setProvider(nextProvider)
+                setStatus("")
+                setModelMenuOpen(false)
+                setModels(next?.recommended_models ?? [])
+                if (!next?.requires_base_url) setBaseUrl("")
+                if (nextProvider === "mock") setModel("mock")
+                else if (nextProvider === config?.provider)
+                  setModel(config.model)
+                else setModel(next?.recommended_models[0] ?? "")
+              }}
               className="mt-1 w-full rounded border px-3 py-2"
               style={{
                 background: "var(--secondary)",
@@ -678,24 +713,67 @@ function SettingsDrawer({
           </label>
           {provider === "mock" && <LocalProviderNotice />}
           {provider !== "mock" && (
-            <label className="block text-xs">
-              Модель
-              <input
-                value={model}
-                onChange={(event) => setModel(event.target.value)}
-                list="llm-models"
-                className="mt-1 w-full rounded border px-3 py-2"
-                style={{
-                  background: "var(--secondary)",
-                  borderColor: "var(--border)",
-                }}
-              />
-              <datalist id="llm-models">
-                {models.map((item) => (
-                  <option key={item} value={item} />
-                ))}
-              </datalist>
-            </label>
+            <div className="block text-xs">
+              <span>Модель</span>
+              <div className="relative mt-1">
+                <input
+                  value={model}
+                  onChange={(event) => {
+                    setModel(event.target.value)
+                    setStatus("")
+                  }}
+                  onFocus={() => setModelMenuOpen(false)}
+                  aria-label="Модель"
+                  aria-expanded={modelMenuOpen}
+                  aria-controls="llm-model-options"
+                  className="w-full rounded border px-3 py-2 pr-9"
+                  style={{
+                    background: "var(--secondary)",
+                    borderColor: "var(--border)",
+                  }}
+                />
+                <button
+                  type="button"
+                  aria-label="Открыть список моделей"
+                  aria-haspopup="listbox"
+                  aria-expanded={modelMenuOpen}
+                  disabled={models.length === 0}
+                  onClick={() => setModelMenuOpen((value) => !value)}
+                  className="absolute right-0 top-0 h-full w-9 rounded-r border-l disabled:opacity-40"
+                  style={{ borderColor: "var(--border)" }}
+                >
+                  ▾
+                </button>
+                {modelMenuOpen && models.length > 0 && (
+                  <div
+                    id="llm-model-options"
+                    role="listbox"
+                    className="absolute z-50 mt-1 max-h-52 w-full overflow-y-auto rounded border shadow-xl"
+                    style={{
+                      background: "var(--card)",
+                      borderColor: "var(--border)",
+                    }}
+                  >
+                    {models.map((item) => (
+                      <button
+                        type="button"
+                        role="option"
+                        aria-selected={model === item}
+                        key={item}
+                        onClick={() => {
+                          setModel(item)
+                          setStatus("")
+                          setModelMenuOpen(false)
+                        }}
+                        className="block w-full px-3 py-2 text-left text-xs hover:bg-white/10"
+                      >
+                        {item}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
           )}
           {selected?.id !== "mock" && (
             <button
@@ -711,7 +789,12 @@ function SettingsDrawer({
               URL роутера
               <input
                 value={baseUrl}
-                onChange={(event) => setBaseUrl(event.target.value)}
+                onChange={(event) => {
+                  setBaseUrl(event.target.value)
+                  setStatus("")
+                  setModels(selected?.recommended_models ?? [])
+                  setModelMenuOpen(false)
+                }}
                 placeholder="https://…"
                 className="mt-1 w-full rounded border px-3 py-2"
                 style={{
@@ -726,7 +809,12 @@ function SettingsDrawer({
               Тип доступа ключа
               <select
                 value={scope}
-                onChange={(event) => setScope(event.target.value as GigaChatScope)}
+                onChange={(event) => {
+                  setScope(event.target.value as GigaChatScope)
+                  setStatus("")
+                  setModels(selected?.recommended_models ?? [])
+                  setModelMenuOpen(false)
+                }}
                 className="mt-1 w-full rounded border px-3 py-2"
                 style={{ background: "var(--secondary)", borderColor: "var(--border)" }}
               >
@@ -743,9 +831,14 @@ function SettingsDrawer({
                 type="password"
                 autoComplete="off"
                 value={apiKey}
-                onChange={(event) => setApiKey(event.target.value)}
+                onChange={(event) => {
+                  setApiKey(event.target.value)
+                  setStatus("")
+                  setModels(selected?.recommended_models ?? [])
+                  setModelMenuOpen(false)
+                }}
                 placeholder={
-                  config?.has_api_key
+                  config?.provider === provider && config.has_api_key
                     ? "Сохранён; оставьте пустым без изменений"
                     : selected?.api_key_optional
                       ? "Необязательно"
@@ -828,7 +921,7 @@ function SettingsDrawer({
 
 // ---------------------------------------------------------------------------
 
-function ClarifyingModal({
+export function ClarifyingModal({
   questions,
   onAnswer,
   onConfirm,
@@ -868,7 +961,7 @@ function ClarifyingModal({
               className="text-xs mt-0.5"
               style={{ color: "var(--muted-foreground)" }}
             >
-              AI-агент обнаружил неоднозначные фрагменты. Выберите действие для
+              Система обнаружила неоднозначные фрагменты. Выберите действие для
               каждого.
             </div>
           </div>
@@ -895,15 +988,37 @@ function ClarifyingModal({
                   >
                     {q.question}
                   </div>
+                  {q.contextLocation && (
+                    <div
+                      className="mt-1 text-[11px]"
+                      style={{ color: "var(--muted-foreground)" }}
+                    >
+                      {q.contextLocation}
+                    </div>
+                  )}
                   <div
-                    className="mt-1 mono text-xs px-2 py-1 rounded border truncate"
+                    className="mt-1 mono text-xs px-2 py-1.5 rounded border whitespace-pre-wrap break-words"
                     style={{
                       background: "var(--muted)",
                       borderColor: "var(--border)",
                       color: "var(--muted-foreground)",
                     }}
                   >
-                    …{q.context}…
+                    {q.highlightStart !== undefined &&
+                    q.highlightEnd !== undefined &&
+                    q.highlightStart >= 0 &&
+                    q.highlightStart < q.highlightEnd &&
+                    q.highlightEnd <= q.context.length ? (
+                      <>
+                        {q.context.slice(0, q.highlightStart)}
+                        <mark className="rounded bg-amber-400/30 px-0.5 text-inherit">
+                          {q.context.slice(q.highlightStart, q.highlightEnd)}
+                        </mark>
+                        {q.context.slice(q.highlightEnd)}
+                      </>
+                    ) : (
+                      q.context
+                    )}
                   </div>
                 </div>
               </div>
@@ -1899,9 +2014,22 @@ export default function App() {
           id: question.question_id,
           question: question.question,
           context:
+            question.context_text?.trim() ||
             DATA_TYPE_OPTIONS.find(
               (option) => option.id === question.related_entity_type,
-            )?.label ?? "Роль стороны",
+            )?.label ||
+            "Роль стороны",
+          contextLocation: question.context_location ?? undefined,
+          highlightStart:
+            question.context_text?.trim() &&
+            typeof question.highlight_start === "number"
+              ? question.highlight_start
+              : undefined,
+          highlightEnd:
+            question.context_text?.trim() &&
+            typeof question.highlight_end === "number"
+              ? question.highlight_end
+              : undefined,
           options: question.options,
         })),
       )

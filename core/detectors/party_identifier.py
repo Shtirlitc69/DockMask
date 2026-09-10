@@ -11,32 +11,70 @@ _PARTY_ENTITY_TYPES = frozenset(
     {EntityType.ORGANIZATION, EntityType.PERSON_NAME}
 )
 _SUPPLIER_PATTERN = re.compile(
-    r"(?<!\w)(?:поставщик|исполнитель|подрядчик)(?!\w)",
+    r"(?<!\w)(?:поставщик|исполнитель|подрядчик|продавец)(?!\w)",
     re.IGNORECASE,
 )
 _BUYER_PATTERN = re.compile(
-    r"(?<!\w)(?:покупатель|заказчик)(?!\w)",
+    r"(?<!\w)(?:покупатель|заказчик|клиент)(?!\w)",
     re.IGNORECASE,
 )
 
 
-def _local_role(text: str) -> tuple[PartyRole, bool]:
-    """Return the role and whether the text contains any local evidence."""
-
-    has_supplier = _SUPPLIER_PATTERN.search(text) is not None
-    has_buyer = _BUYER_PATTERN.search(text) is not None
-
-    if has_supplier and not has_buyer:
-        return PartyRole.SUPPLIER, True
-    if has_buyer and not has_supplier:
-        return PartyRole.BUYER, True
-    return PartyRole.UNKNOWN, has_supplier or has_buyer
+def _marker_distance(marker: re.Match[str], start: int, end: int) -> int:
+    if marker.end() <= start:
+        return start - marker.end()
+    if marker.start() >= end:
+        return marker.start() - end
+    return 0
 
 
-def _context(blocks: list[TextBlock], index: int) -> str:
+def _local_role(text: str, start: int, end: int) -> tuple[PartyRole, bool]:
+    """Return the role of one candidate based on its nearest explicit marker."""
+
+    left = max(text.rfind(separator, 0, start) for separator in (".", ";", "\n", "\r")) + 1
+    right = min(
+        (
+            position
+            for separator in (".", ";", "\n", "\r")
+            if (position := text.find(separator, end)) >= 0
+        ),
+        default=len(text),
+    )
+
+    def collect(search_start: int, search_end: int) -> list[tuple[int, PartyRole]]:
+        return [
+            *(
+                (_marker_distance(marker, start, end), PartyRole.SUPPLIER)
+                for marker in _SUPPLIER_PATTERN.finditer(text, search_start, search_end)
+            ),
+            *(
+                (_marker_distance(marker, start, end), PartyRole.BUYER)
+                for marker in _BUYER_PATTERN.finditer(text, search_start, search_end)
+            ),
+        ]
+
+    evidence = collect(left, right) or collect(0, len(text))
+    if not evidence:
+        return PartyRole.UNKNOWN, False
+    nearest_distance = min(distance for distance, _ in evidence)
+    nearest_roles = {
+        role for distance, role in evidence if distance == nearest_distance
+    }
+    if len(nearest_roles) == 1:
+        return nearest_roles.pop(), True
+    return PartyRole.UNKNOWN, True
+
+
+def _context(blocks: list[TextBlock], index: int, match: Match) -> tuple[str, int, int]:
     start = max(0, index - 1)
     end = min(len(blocks), index + 2)
-    return "\n".join(block.text for block in blocks[start:end])
+    selected = blocks[start:end]
+    prefix = sum(len(block.text) + 1 for block in selected[: index - start])
+    return (
+        "\n".join(block.text for block in selected),
+        prefix + match.start,
+        prefix + match.end,
+    )
 
 
 async def identify_parties(
@@ -51,41 +89,52 @@ async def identify_parties(
         if not matches:
             continue
 
-        local_role, has_local_evidence = _local_role(block.text)
-        if not has_local_evidence:
-            neighbor_texts: list[str] = []
-            if index > 0:
-                neighbor_texts.append(blocks[index - 1].text)
-            if index + 1 < len(blocks):
-                neighbor_texts.append(blocks[index + 1].text)
-            neighbor_text = "\n".join(neighbor_texts)
-            local_role, has_local_evidence = _local_role(neighbor_text)
-
-        context_snippet: str | None = None
         for match in matches:
             if match.entity_type not in _PARTY_ENTITY_TYPES:
                 continue
-
-            if has_local_evidence:
-                if local_role is not PartyRole.UNKNOWN and (
-                    match.party_role is PartyRole.UNKNOWN
-                    or llm_client.provides_inline_roles
-                ):
-                    match.party_role = local_role
-                continue
-
             if match.party_role is not PartyRole.UNKNOWN:
                 continue
-            if llm_client.provides_inline_roles:
+
+            local_role, _ = _local_role(block.text, match.start, match.end)
+            if local_role is not PartyRole.UNKNOWN:
+                match.party_role = local_role
                 continue
 
-            if context_snippet is None:
-                context_snippet = _context(blocks, index)
+            context_snippet, context_start, context_end = _context(
+                blocks, index, match
+            )
+            local_role, _ = _local_role(
+                context_snippet, context_start, context_end
+            )
+            if local_role is not PartyRole.UNKNOWN:
+                match.party_role = local_role
+                continue
+
             llm_role = await llm_client.classify_party(
                 context_snippet,
                 match.text,
             )
             if llm_role in (PartyRole.SUPPLIER, PartyRole.BUYER):
                 match.party_role = llm_role
+
+    roles_by_entity: dict[tuple[EntityType, str], set[PartyRole]] = {}
+    for match in (
+        item for values in matches_by_block.values() for item in values
+    ):
+        if match.entity_type not in _PARTY_ENTITY_TYPES:
+            continue
+        if match.party_role is PartyRole.UNKNOWN:
+            continue
+        roles_by_entity.setdefault((match.entity_type, match.text), set()).add(
+            match.party_role
+        )
+    for match in (
+        item for values in matches_by_block.values() for item in values
+    ):
+        if match.party_role is not PartyRole.UNKNOWN:
+            continue
+        roles = roles_by_entity.get((match.entity_type, match.text), set())
+        if len(roles) == 1:
+            match.party_role = next(iter(roles))
 
     return matches_by_block

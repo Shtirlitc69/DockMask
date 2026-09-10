@@ -26,6 +26,10 @@ export interface ClarificationQuestion {
 
   related_entity_type: EntityType | null
   options: Array<"supplier" | "buyer" | "unknown">
+  context_text?: string | null
+  context_location?: string | null
+  highlight_start?: number | null
+  highlight_end?: number | null
 }
 
 export interface JobStatusResponse {
