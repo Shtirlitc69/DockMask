@@ -106,7 +106,8 @@ class LLMFactoryTests(unittest.TestCase):
         custom = next(
             spec for spec in specs if spec.id is ProviderId.OPENAI_COMPATIBLE
         )
-        self.assertTrue(mock.development_only)
+        self.assertEqual(mock.display_name, "Локальный режим (без LLM)")
+        self.assertFalse(mock.development_only)
         self.assertTrue(custom.requires_base_url)
         self.assertFalse(custom.requires_api_key)
 

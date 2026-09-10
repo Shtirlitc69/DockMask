@@ -21,11 +21,11 @@ GIGACHAT_DEFAULT_SCOPE = GigaChatScope.PERS.value
 PROVIDER_SPECS: tuple[LLMProviderSpec, ...] = (
     LLMProviderSpec(
         ProviderId.MOCK,
-        "Mock",
+        "Локальный режим (без LLM)",
         requires_api_key=False,
         requires_base_url=False,
         supports_model_listing=False,
-        development_only=True,
+        development_only=False,
     ),
     LLMProviderSpec(ProviderId.GIGACHAT, "GigaChat", True, False),
     LLMProviderSpec(ProviderId.OPENAI, "OpenAI", True, False),

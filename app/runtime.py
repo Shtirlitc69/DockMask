@@ -292,8 +292,6 @@ class RuntimeConfigService:
         )
 
     async def client_for(self, record: JobRecord):
-        if record.provider is ProviderId.MOCK and not self._development:
-            raise ValueError("mock provider is disabled")
         config = await self.resolved_config(
             LLMClientConfig(
                 record.provider,

@@ -66,7 +66,7 @@ Jinja2, HTMX, `app/templates`, `app/static` и `routes_ui.py` не входят 
 | XLSX | openpyxl | Обработка ячеек и подсветка замен |
 | PDF | PyMuPDF | Извлечение и настоящая redaction |
 | OCR | Tesseract 5.4, rus/eng tessdata | Локальное распознавание сканированных страниц PDF |
-| LLM | GigaChat, OpenAI, Anthropic, OpenAI-compatible, Ollama, vLLM; mock в development | Взаимозаменяемые адаптеры |
+| LLM | Локальный режим, GigaChat, OpenAI, Anthropic, OpenAI-compatible, Ollama, vLLM | Взаимозаменяемые адаптеры |
 | Frontend | React 19, TypeScript, Vite, Tailwind CSS v4, pnpm | Локальный интерфейс |
 | Оболочка | pywebview, WebView2, PyInstaller | Windows-приложение |
 | Качество | Ruff, pytest, pytest-asyncio, httpx, Vitest | Проверки backend и frontend |

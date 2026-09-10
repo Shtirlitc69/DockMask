@@ -428,6 +428,22 @@ function ReplacementReport({ replacements }: { replacements: Replacement[] }) {
 
 // ---------------------------------------------------------------------------
 
+export function LocalProviderNotice() {
+  return (
+    <div
+      className="rounded border p-3 text-xs leading-relaxed"
+      style={{
+        borderColor: "var(--border)",
+        color: "var(--muted-foreground)",
+      }}
+    >
+      Документы обрабатываются только на этом компьютере по локальным
+      правилам и не отправляются внешним сервисам. На сложных и
+      неоднозначных формулировках точность может быть ниже, чем у LLM.
+    </div>
+  )
+}
+
 function SettingsDrawer({
   open,
   onClose,
@@ -474,6 +490,7 @@ function SettingsDrawer({
     if (!open || !selected) return
     setModels(selected.recommended_models)
     if (!selected.requires_base_url) setBaseUrl("")
+    if (selected.id === "mock") setModel("mock")
   }, [open, selected])
 
   const validationPayload = () => ({
@@ -609,24 +626,27 @@ function SettingsDrawer({
               ))}
             </select>
           </label>
-          <label className="block text-xs">
-            Модель
-            <input
-              value={model}
-              onChange={(event) => setModel(event.target.value)}
-              list="llm-models"
-              className="mt-1 w-full rounded border px-3 py-2"
-              style={{
-                background: "var(--secondary)",
-                borderColor: "var(--border)",
-              }}
-            />
-            <datalist id="llm-models">
-              {models.map((item) => (
-                <option key={item} value={item} />
-              ))}
-            </datalist>
-          </label>
+          {provider === "mock" && <LocalProviderNotice />}
+          {provider !== "mock" && (
+            <label className="block text-xs">
+              Модель
+              <input
+                value={model}
+                onChange={(event) => setModel(event.target.value)}
+                list="llm-models"
+                className="mt-1 w-full rounded border px-3 py-2"
+                style={{
+                  background: "var(--secondary)",
+                  borderColor: "var(--border)",
+                }}
+              />
+              <datalist id="llm-models">
+                {models.map((item) => (
+                  <option key={item} value={item} />
+                ))}
+              </datalist>
+            </label>
+          )}
           {selected?.id !== "mock" && (
             <button
               onClick={() => void loadModels()}

@@ -22,18 +22,35 @@ class MemorySecretStore:
         self.values.pop(provider, None)
 
 
-def test_runtime_processes_docx_and_exposes_all_artifacts(tmp_path: Path) -> None:
+def test_production_runtime_processes_docx_with_default_local_provider(
+    tmp_path: Path,
+) -> None:
     source = tmp_path / "source.docx"
     document = Document()
     document.add_paragraph("E-mail: email@example.test")
     document.save(source)
     secret_store = MemorySecretStore()
     app = create_app(
-        settings=Settings(data_dir=tmp_path / "runtime", env="development"),
+        settings=Settings(data_dir=tmp_path / "runtime", env="production"),
         secret_store=secret_store,
     )
 
     with TestClient(app) as client, source.open("rb") as stream:
+        config = client.get("/api/config")
+        assert config.status_code == 200
+        payload = config.json()
+        assert payload["provider"] == "mock"
+        assert payload["model"] == "mock"
+        local_provider = next(item for item in payload["providers"] if item["id"] == "mock")
+        assert local_provider == {
+            "id": "mock",
+            "display_name": "Локальный режим (без LLM)",
+            "available": True,
+            "requires_base_url": False,
+            "api_key_optional": True,
+            "development_only": False,
+            "recommended_models": ["mock"],
+        }
         created = client.post(
             "/api/jobs",
             files={"file": (source.name, stream, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
