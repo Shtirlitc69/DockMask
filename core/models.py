@@ -85,6 +85,14 @@ class PartyRole(str, Enum):
     UNKNOWN = "unknown"
 
 
+class EvidenceKind(str, Enum):
+    EXPLICIT_PARTY_ROLE = "explicit_party_role"
+    SHARED_IDENTIFIER = "shared_identifier"
+    NORMALIZED_NAME = "normalized_name"
+    PERSON_REPRESENTS_ORGANIZATION = "person_represents_organization"
+    CONSISTENT_MENTION = "consistent_mention"
+
+
 PARTY_ROLE_DISPLAY_NAMES: dict[PartyRole, str] = {
     PartyRole.SUPPLIER: "Поставщик",
     PartyRole.BUYER: "Покупатель",
@@ -126,6 +134,22 @@ class TextBlock:
             raise ValueError("block_id не может быть пустым")
 
 
+@dataclass(slots=True, frozen=True)
+class EvidenceRecord:
+    kind: EvidenceKind
+    block_id: str
+    subject_id: str
+    object_id: str | None = None
+    value: str | None = None
+    confidence: float = 1.0
+
+    def __post_init__(self) -> None:
+        if not self.block_id or not self.subject_id:
+            raise ValueError("evidence должен ссылаться на блок и субъект")
+        if not 0.0 <= self.confidence <= 1.0:
+            raise ValueError("confidence должен быть в диапазоне от 0.0 до 1.0")
+
+
 def _validate_span(text: str, start: int, end: int, confidence: float) -> None:
     if not 0 <= start < end:
         raise ValueError("span должен удовлетворять условию 0 <= start < end")
@@ -165,6 +189,10 @@ class Match:
     confidence: float
     location: Location
     party_role: PartyRole = PartyRole.UNKNOWN
+    entity_id: str | None = None
+    organization_id: str | None = None
+    evidence: tuple[EvidenceRecord, ...] = ()
+    conflict: bool = False
     applied: bool = False
 
     def __post_init__(self) -> None:
@@ -196,6 +224,7 @@ class ClarifyingQuestion:
     context_location: str | None = None
     highlight_start: int | None = None
     highlight_end: int | None = None
+    contexts: tuple[dict[str, object], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.question:
@@ -207,6 +236,35 @@ class ClarifyingQuestion:
                 raise ValueError("для подсветки требуется текст контекста")
             if not 0 <= self.highlight_start < self.highlight_end <= len(self.context_text):
                 raise ValueError("границы подсветки выходят за текст контекста")
+
+
+@dataclass(slots=True)
+class OrganizationRecord:
+    entity_id: str
+    canonical_name: str
+    aliases: tuple[str, ...]
+    mention_keys: tuple[tuple[str, int, int], ...]
+    role: PartyRole = PartyRole.UNKNOWN
+    confidence: float = 0.0
+    conflict: bool = False
+    evidence: tuple[EvidenceRecord, ...] = ()
+
+
+@dataclass(slots=True)
+class PersonRecord:
+    entity_id: str
+    canonical_name: str
+    aliases: tuple[str, ...]
+    organization_id: str | None = None
+    evidence: tuple[EvidenceRecord, ...] = ()
+
+
+@dataclass(slots=True, frozen=True)
+class EntityRelation:
+    kind: EvidenceKind
+    subject_id: str
+    object_id: str
+    evidence: tuple[EvidenceRecord, ...] = ()
 
 
 @dataclass(slots=True)

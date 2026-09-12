@@ -32,6 +32,7 @@ class AnthropicClient(StructuredLLMClient):
     source = "anthropic"
     provider_name = "anthropic"
     batch_max_chars = 120_000
+    batch_input_token_limit = 60_000
 
     def __init__(
         self,

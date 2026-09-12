@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import time
 from typing import Self
 from uuid import uuid4
+from weakref import WeakKeyDictionary
 
 import httpx
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -14,10 +17,17 @@ from llm.http_utils import (
     LLMContextLimitError,
     LLMHTTPError,
     LLMProviderError,
+    _retry_after_seconds,
     is_context_limit_response,
     retry_delay,
 )
-from llm.structured import LLMResponseError, StructuredLLMClient
+from llm.request_budget import consume_request
+from llm.structured import (
+    LLMFilteredResponseError,
+    LLMResponseError,
+    LLMTruncatedResponseError,
+    StructuredLLMClient,
+)
 from llm.types import LLMModelInfo
 
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
@@ -25,6 +35,24 @@ MODELS_PATH = "/v1/models"
 MAX_ATTEMPTS = 3
 TOKEN_SAFETY_RATIO = 0.1
 USER_AGENT = "DockMask/0.1"
+LOGGER = logging.getLogger(__name__)
+
+
+class _GenerationGate:
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.ready_at = 0.0
+
+
+# Application-wide within an event loop, including separately constructed probes.
+_GATES: WeakKeyDictionary = WeakKeyDictionary()
+
+
+def _generation_gate() -> _GenerationGate:
+    loop = asyncio.get_running_loop()
+    if loop not in _GATES:
+        _GATES[loop] = _GenerationGate()
+    return _GATES[loop]
 
 
 class GigaChatError(LLMProviderError):
@@ -59,6 +87,7 @@ class _ChatChoice(BaseModel):
     model_config = ConfigDict(extra="ignore", strict=True)
 
     message: _ChatMessage
+    finish_reason: str | None = None
 
 
 class _ChatResponse(BaseModel):
@@ -70,7 +99,7 @@ class _ChatResponse(BaseModel):
 class GigaChatClient(StructuredLLMClient):
     """Call GigaChat through an injected or internally owned HTTP client."""
 
-    batch_max_chars = 180_000
+    batch_max_chars = 12_000
     batch_max_concurrency = 1
     provides_inline_roles = True
     provider_name = "gigachat"
@@ -86,6 +115,10 @@ class GigaChatClient(StructuredLLMClient):
         oauth_url: str,
         base_url: str,
         timeout_seconds: float = 30.0,
+        *,
+        context_tokens: int | None = None,
+        output_tokens: int = 4096,
+        min_interval_seconds: float = 0.25,
     ) -> None:
         if not auth_key:
             raise ValueError("auth_key must not be empty")
@@ -93,6 +126,19 @@ class GigaChatClient(StructuredLLMClient):
             raise ValueError("GigaChat configuration values must not be empty")
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+
+        # Conservative fallback for unknown/legacy models; caller may override.
+        self._context_tokens = context_tokens or (
+            128_000 if model in {"GigaChat-2", "GigaChat-2-Pro", "GigaChat-2-Max"}
+            else 32_768
+        )
+        if output_tokens <= 0 or self._context_tokens <= output_tokens + 2048:
+            raise ValueError("invalid context/output token budget")
+        if min_interval_seconds < 0:
+            raise ValueError("min_interval_seconds must be nonnegative")
+        self._output_tokens = output_tokens
+        self.batch_input_token_limit = self._context_tokens - self._output_tokens - 2048
+        self._min_interval = min_interval_seconds
 
         self._auth_key = auth_key
         self._scope = scope
@@ -180,12 +226,32 @@ class GigaChatClient(StructuredLLMClient):
         *,
         system_prompt: str | None = None,
     ) -> str:
+        gate = _generation_gate()
+        async with gate.lock:
+            delay = gate.ready_at - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            try:
+                return await self._complete_serialized(
+                    prompt, response_schema, system_prompt=system_prompt
+                )
+            finally:
+                gate.ready_at = max(gate.ready_at, time.monotonic() + self._min_interval)
+
+    async def _complete_serialized(
+        self,
+        prompt: str,
+        response_schema: dict[str, object],
+        *,
+        system_prompt: str | None = None,
+    ) -> str:
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
         payload = {
             "model": self._model,
+            "max_tokens": self._output_tokens,
             "messages": messages,
             "response_format": {
                 "type": "json_schema",
@@ -193,12 +259,20 @@ class GigaChatClient(StructuredLLMClient):
                 "strict": True,
             },
         }
+        # UTF-8 bytes deliberately overestimate tokens; includes schema and framing.
+        estimated_tokens = len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) + 256
+        if estimated_tokens + self._output_tokens > self._context_tokens:
+            raise LLMContextLimitError("GigaChat full request exceeds local context budget")
+        batch_id = uuid4().hex
+        stage = "party" if "role" in response_schema.get("properties", {}) else "entities"
         transient_attempt = 0
         refreshed_after_401 = False
         token = await self._get_token()
 
         while True:
             try:
+                consume_request()
+                started = time.monotonic()
                 response = await self._http_client.post(
                     self._chat_url,
                     headers={
@@ -219,6 +293,17 @@ class GigaChatClient(StructuredLLMClient):
                 await retry_delay(transient_attempt)
                 continue
 
+            LOGGER.info(
+                "gigachat_generation stage=%s model=%s batch=%s status=%d duration_ms=%d",
+                stage, self._model, batch_id, response.status_code,
+                int((time.monotonic() - started) * 1000),
+            )
+            if response.status_code == 429:
+                cooldown = _retry_after_seconds(response)
+                gate = _generation_gate()
+                gate.ready_at = max(
+                    gate.ready_at, time.monotonic() + max(1.0, cooldown or 0.0)
+                )
             if response.status_code == 401 and not refreshed_after_401:
                 refreshed_after_401 = True
                 token = await self._refresh_rejected_token(token)
@@ -231,17 +316,38 @@ class GigaChatClient(StructuredLLMClient):
                 transient_attempt += 1
                 if transient_attempt < MAX_ATTEMPTS:
                     await retry_delay(transient_attempt, response)
+                    await asyncio.sleep(max(0.0, _generation_gate().ready_at - time.monotonic()))
                     continue
             if not 200 <= response.status_code < 300:
                 raise GigaChatHTTPError(response.status_code)
 
             try:
-                envelope = _ChatResponse.model_validate(response.json())
-                return envelope.choices[0].message.content
+                raw = response.json()
+                envelope = _ChatResponse.model_validate(raw)
+                choice = envelope.choices[0]
             except (ValueError, ValidationError, IndexError):
+                LOGGER.warning("gigachat_validation batch=%s category=invalid_envelope", batch_id)
                 raise LLMResponseError(
                     "GigaChat returned an invalid chat response"
                 ) from None
+            reason = choice.finish_reason
+            safe_reason = reason if reason in {None, "stop", "length", "blacklist", "content_filter"} else "other"
+            usage = raw.get("usage", {})
+            safe_usage = {
+                key: value for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+                if isinstance(usage, dict) and type(value := usage.get(key)) is int
+            }
+            LOGGER.info(
+                "gigachat_completion batch=%s finish_reason=%s usage=%s",
+                batch_id, safe_reason, safe_usage,
+            )
+            if reason == "length":
+                raise LLMTruncatedResponseError("GigaChat output token limit reached")
+            if reason in {"blacklist", "content_filter"}:
+                raise LLMFilteredResponseError("GigaChat response filtered")
+            if reason not in {None, "stop"}:
+                raise LLMResponseError("GigaChat returned an unsupported finish reason")
+            return choice.message.content
 
     async def _get_token(self) -> str:
         if self._token_is_valid():

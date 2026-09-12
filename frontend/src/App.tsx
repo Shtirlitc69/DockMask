@@ -47,6 +47,9 @@ const PROVIDER_ERROR_LABELS: Record<string, string> = {
   gigachat_payment_required: "для ключа недоступна оплачиваемая операция",
   gigachat_rate_limited: "исчерпан лимит запросов GigaChat",
   provider_invalid_response: "провайдер вернул некорректный ответ",
+  provider_request_budget: "достигнут безопасный предел запросов; разделите документ",
+  provider_response_truncated: "ответ модели обрезан даже после разделения документа",
+  provider_response_filtered: "провайдер заблокировал ответ; обработка остановлена",
   provider_unavailable: "провайдер временно недоступен",
   provider_context_limit:
     "документ не помещается в контекст выбранной модели даже после разделения",

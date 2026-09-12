@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 
 from core.models import EntityType, Match, PartyRole, TextBlock
 from llm.base import BaseLLMClient
+from llm.request_budget import LLMRequestBudgetError
 
 _PARTY_ENTITY_TYPES = frozenset(
     {EntityType.ORGANIZATION, EntityType.PERSON_NAME}
@@ -77,14 +79,22 @@ def _context(blocks: list[TextBlock], index: int, match: Match) -> tuple[str, in
     )
 
 
+def _entity_key(match: Match) -> tuple[EntityType, str]:
+    return (match.entity_type, match.entity_id or match.text)
+
+
 async def identify_parties(
     blocks: list[TextBlock],
     matches_by_block: dict[str, list[Match]],
     llm_client: BaseLLMClient,
+    cancel_check: Callable[[], None] | None = None,
 ) -> dict[str, list[Match]]:
     """Assign party roles in place, preferring deterministic local evidence."""
 
+    pending: list[tuple[Match, str, bool]] = []
     for index, block in enumerate(blocks):
+        if cancel_check is not None:
+            cancel_check()
         matches = matches_by_block.get(block.block_id, ())
         if not matches:
             continue
@@ -103,19 +113,37 @@ async def identify_parties(
             context_snippet, context_start, context_end = _context(
                 blocks, index, match
             )
-            local_role, _ = _local_role(
+            local_role, has_markers = _local_role(
                 context_snippet, context_start, context_end
             )
             if local_role is not PartyRole.UNKNOWN:
                 match.party_role = local_role
                 continue
 
-            llm_role = await llm_client.classify_party(
-                context_snippet,
-                match.text,
-            )
-            if llm_role in (PartyRole.SUPPLIER, PartyRole.BUYER):
-                match.party_role = llm_role
+            pending.append((match, context_snippet, has_markers))
+
+    # Gather all explicit evidence before resolving repeated, unmarked mentions.
+    known: dict[tuple[EntityType, str], set[PartyRole]] = {}
+    for values in matches_by_block.values():
+        for match in values:
+            if match.party_role is not PartyRole.UNKNOWN:
+                known.setdefault(_entity_key(match), set()).add(match.party_role)
+    cache: dict[tuple[EntityType, str, str], PartyRole | None] = {}
+    for match, context_snippet, has_markers in pending:
+        if cancel_check is not None:
+            cancel_check()
+        roles = known.get(_entity_key(match), set())
+        if not has_markers and len(roles) == 1:
+            match.party_role = next(iter(roles))
+            continue
+        key = (match.entity_type, match.text, context_snippet)
+        if key not in cache:
+            if len(cache) >= 32:
+                raise LLMRequestBudgetError("LLM role request budget exceeded")
+            cache[key] = await llm_client.classify_party(context_snippet, match.text)
+        llm_role = cache[key]
+        if llm_role in (PartyRole.SUPPLIER, PartyRole.BUYER):
+            match.party_role = llm_role
 
     roles_by_entity: dict[tuple[EntityType, str], set[PartyRole]] = {}
     for match in (
@@ -125,7 +153,7 @@ async def identify_parties(
             continue
         if match.party_role is PartyRole.UNKNOWN:
             continue
-        roles_by_entity.setdefault((match.entity_type, match.text), set()).add(
+        roles_by_entity.setdefault(_entity_key(match), set()).add(
             match.party_role
         )
     for match in (
@@ -133,8 +161,15 @@ async def identify_parties(
     ):
         if match.party_role is not PartyRole.UNKNOWN:
             continue
-        roles = roles_by_entity.get((match.entity_type, match.text), set())
+        roles = roles_by_entity.get(_entity_key(match), set())
         if len(roles) == 1:
             match.party_role = next(iter(roles))
+
+    # Conflicting strong conclusions remain unresolved for every alias in the group.
+    conflicts = {key for key, roles in roles_by_entity.items() if len(roles) > 1}
+    for match in (item for values in matches_by_block.values() for item in values):
+        if _entity_key(match) in conflicts:
+            match.party_role = PartyRole.UNKNOWN
+            match.conflict = True
 
     return matches_by_block

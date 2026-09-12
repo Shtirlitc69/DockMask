@@ -93,6 +93,20 @@ class ReportGenerator:
                 "source": match.source,
                 "confidence": match.confidence,
                 "party_role": match.party_role.value,
+                "entity_id": match.entity_id,
+                "organization_id": match.organization_id,
+                "evidence": [
+                    {
+                        "kind": item.kind.value,
+                        "block_id": item.block_id,
+                        "subject_id": item.subject_id,
+                        "object_id": item.object_id,
+                        "value": item.value,
+                        "confidence": item.confidence,
+                    }
+                    for item in match.evidence
+                ],
+                "conflict": match.conflict,
                 "applied": bool(match.applied),
             }
             for match in source

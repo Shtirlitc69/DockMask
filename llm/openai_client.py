@@ -15,6 +15,7 @@ class OpenAIClient(OpenAICompatibleClient):
     source = "openai"
     provider_name = "openai"
     batch_max_chars = 120_000
+    batch_input_token_limit = 60_000
 
     def __init__(
         self,

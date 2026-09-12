@@ -31,6 +31,20 @@ ModelT = TypeVar("ModelT", bound=BaseModel)
 class LLMResponseError(RuntimeError):
     """A provider response did not satisfy the structured-output contract."""
 
+    category = "invalid_response"
+
+
+class LLMTruncatedResponseError(LLMResponseError):
+    """Generation reached its output limit; a smaller batch may help."""
+
+    category = "response_truncated"
+
+
+class LLMFilteredResponseError(LLMResponseError):
+    """Provider filtering prevented complete processing; do not retry."""
+
+    category = "response_filtered"
+
 
 class EntityItem(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -86,6 +100,7 @@ def parse_model_json(content: str, model: type[ModelT]) -> ModelT:
     try:
         return model.model_validate_json(stripped)
     except ValidationError:
+        LOGGER.warning("llm_validation category=invalid_structured_json")
         raise LLMResponseError("Provider returned invalid structured JSON") from None
 
 
@@ -146,6 +161,7 @@ class StructuredLLMClient(BaseLLMClient):
     source = "llm"
     confidence = 0.8
     batch_max_chars = 24_000
+    batch_input_token_limit = 12_000
     batch_max_concurrency = 1
     provides_inline_roles = True
 
@@ -242,6 +258,56 @@ class StructuredLLMClient(BaseLLMClient):
                             source=self.source,
                             confidence=self.confidence,
                             party_role=PartyRole(entity.party_role),
+                        )
+                    )
+                start = end
+        for spans in result.values():
+            spans.sort(key=lambda span: (span.start, span.end, span.entity_type.value))
+        return result
+
+    async def find_entities_for_analysis(
+        self,
+        blocks: Sequence[TextBlock],
+        mask_types: Sequence[EntityType],
+        auxiliary_types: Sequence[EntityType],
+    ) -> dict[str, list[EntitySpan]]:
+        requested = tuple(dict.fromkeys((*mask_types, *auxiliary_types)))
+        selected = frozenset(requested)
+        result = {block.block_id: [] for block in blocks}
+        if not blocks or not selected:
+            return result
+        indexed = list(enumerate(blocks))
+        content = await self._complete(
+            build_block_entity_prompt(
+                [(index, block.text) for index, block in indexed],
+                selected,
+                mask_types=mask_types,
+                auxiliary_types=auxiliary_types,
+            ),
+            block_entity_response_schema([index for index, _ in indexed], selected),
+            system_prompt=BATCH_ENTITY_SYSTEM_PROMPT,
+        )
+        payload = parse_model_json(content, BlockEntitiesResponse)
+        by_index = {index: block for index, block in indexed}
+        seen: set[tuple[int, EntityType, int, int]] = set()
+        for entity in payload.entities:
+            block = by_index.get(entity.block_id)
+            try:
+                entity_type = EntityType(entity.type)
+            except ValueError:
+                continue
+            if block is None or entity_type not in selected or not entity.text:
+                continue
+            start = 0
+            while (start := block.text.find(entity.text, start)) >= 0:
+                end = start + len(entity.text)
+                identity = (entity.block_id, entity_type, start, end)
+                if identity not in seen:
+                    seen.add(identity)
+                    result[block.block_id].append(
+                        EntitySpan(
+                            entity_type, entity.text, start, end, self.source,
+                            self.confidence, PartyRole(entity.party_role),
                         )
                     )
                 start = end

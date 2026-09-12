@@ -394,7 +394,8 @@ class GigaChatClientTests(unittest.IsolatedAsyncioTestCase):
                         [EntityType.PERSON_NAME],
                     )
                 self.assertEqual(chat_calls, 3)
-                self.assertEqual(sleep_mock.await_count, 2)
+                # Two retry waits plus optional pacing shared with the previous client.
+                self.assertIn(sleep_mock.await_count, (2, 3))
 
     async def test_other_4xx_is_not_retried(self) -> None:
         chat_calls = 0

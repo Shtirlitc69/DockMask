@@ -8,7 +8,8 @@ from re import Pattern
 
 from core.models import EntitySpan, EntityType
 
-_SEPARATOR = r"[ \t]*(?::|№)?[ \t]*"
+_HSPACE = r"[ \t\u00a0]"
+_SEPARATOR = rf"{_HSPACE}*(?::|№)?{_HSPACE}*"
 _VALUE_BOUNDARY_START = r"(?<!\d)"
 _VALUE_BOUNDARY_END = r"(?!\d)"
 
@@ -94,11 +95,41 @@ _BIK_PATTERNS = (
 _CONTRACT_NUMBER_PATTERNS = (
     re.compile(
         r"\b(?:договор(?:а|у|ом|е)?|контракт(?:а|у|ом|е)?)\b"
-        r"(?:[ \t]+[А-ЯЁа-яё-]+){0,4}[ \t]*"
-        r"(?:№|N|номер)[ \t]*(?::|-)?[ \t]*"
+        rf"(?:{_HSPACE}+[А-ЯЁа-яё-]+){{0,4}}{_HSPACE}*"
+        rf"(?:№|N|номер){_HSPACE}*(?::|-)?{_HSPACE}*"
         r"(?P<value>(?=[A-ZА-ЯЁ0-9./-]*\d)"
         r"[A-ZА-ЯЁ0-9](?:[A-ZА-ЯЁ0-9./-]*[A-ZА-ЯЁ0-9])?)"
         r"(?![\w./-])",
+        re.IGNORECASE,
+    ),
+)
+
+_PERSON_NAME_PATTERNS = (
+    re.compile(
+        r"\bв\s+лице(?:\s+[а-яё-]+){0,5}\s+"
+        r"(?P<value>[А-ЯЁ][а-яё-]+\s+[А-ЯЁ][а-яё-]+\s+[А-ЯЁ][а-яё-]+)"
+        r"(?=\s*[,;])",
+        re.IGNORECASE,
+    ),
+)
+
+_ORGANIZATION_PATTERNS = (
+    re.compile(
+        r"(?P<value>(?<!\w)(?:ООО|ПАО|АО|ЗАО|ОАО|ИП)\s+"
+        r"(?:«[^»\r\n]+»|\"[^\"\r\n]+\"|"
+        r"[А-ЯЁ][\w.-]*(?:\s+[А-ЯЁ][\w.-]*){0,4}))"
+    ),
+    re.compile(
+        r"(?P<value>(?<!\w)(?:ГАУ|ГБУ|МБУ|ФГБУ)(?:\s+[А-ЯЁ]{2,5})?\s+"
+        r"(?:«[^»\r\n]+»|\"[^\"\r\n]+\"|"
+        r"[А-ЯЁ][\w.-]*(?:\s+[А-ЯЁ][\w.-]*){0,4}))"
+    ),
+)
+
+_ADDRESS_PATTERNS = (
+    re.compile(
+        r"(?:\bюридический\s+|\bпочтовый\s+|\bфактический\s+)?\bадрес\s*:\s*"
+        r"(?P<value>[^;\r\n]{5,}(?:\r?\n(?:г\.|ул\.|просп\.|пер\.|д\.)[^;\r\n]+)?)",
         re.IGNORECASE,
     ),
 )
@@ -175,6 +206,9 @@ _DETECTORS: dict[
     EntityType,
     tuple[Sequence[Pattern[str]], Callable[[str], bool]],
 ] = {
+    EntityType.PERSON_NAME: (_PERSON_NAME_PATTERNS, _always_valid),
+    EntityType.ORGANIZATION: (_ORGANIZATION_PATTERNS, _always_valid),
+    EntityType.ADDRESS: (_ADDRESS_PATTERNS, _always_valid),
     EntityType.INN: (_INN_PATTERNS, _is_valid_inn),
     EntityType.KPP: (_KPP_PATTERNS, _always_valid),
     EntityType.OGRN: (_OGRN_PATTERNS, _is_valid_ogrn),

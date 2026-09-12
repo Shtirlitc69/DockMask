@@ -7,9 +7,18 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from core.detectors.rule_based import detect_rule_based
-from core.models import ENTITY_MARKER_PREFIXES, EntitySpan, EntityType, Match, TextBlock
+from core.document_registry import build_document_registry
+from core.models import (
+    ENTITY_MARKER_PREFIXES,
+    EntitySpan,
+    EntityType,
+    Match,
+    TextBlock,
+)
 from llm.base import BaseLLMClient
 from llm.http_utils import LLMContextLimitError
+from llm.request_budget import LLMRequestBudgetError
+from llm.structured import LLMTruncatedResponseError
 
 RULE_BASED_TYPES = frozenset(
     {
@@ -22,6 +31,10 @@ RULE_BASED_TYPES = frozenset(
         EntityType.BIK,
         EntityType.CONTRACT_NUMBER,
     }
+)
+
+HYBRID_FALLBACK_TYPES = frozenset(
+    {EntityType.PERSON_NAME, EntityType.ORGANIZATION, EntityType.ADDRESS}
 )
 
 LLM_BASED_TYPES = frozenset(
@@ -38,6 +51,9 @@ LLM_FRAGMENT_OVERLAP = 512
 LLM_MIN_FRAGMENT_CHARS = 2_000
 LLM_MAX_ADAPTIVE_DEPTH = 8
 LLM_MAX_REQUESTS_PER_JOB = 64
+AUXILIARY_ORGANIZATION_TYPES = frozenset(
+    {EntityType.ORGANIZATION, EntityType.INN, EntityType.KPP, EntityType.OGRN}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +88,7 @@ def _is_valid_span(
         return False
     if not 0 <= span.start < span.end <= len(block_text):
         return False
-    if not span.text or block_text[span.start : span.end] != span.text:
+    if not span.text.strip() or block_text[span.start : span.end] != span.text:
         return False
     return 0.0 <= span.confidence <= 1.0
 
@@ -163,20 +179,31 @@ def _fragment_blocks(
 def _llm_batches(
     fragments: Sequence[_LLMFragment],
     max_chars: int,
+    max_blocks: int = 100,
+    max_tokens: int = 0,
+    token_estimator: Callable[[str], int] | None = None,
 ) -> list[list[_LLMFragment]]:
     if max_chars <= 0:
         return [[fragment] for fragment in fragments]
     batches: list[list[_LLMFragment]] = []
     current: list[_LLMFragment] = []
     current_chars = 0
+    current_tokens = 0
     for fragment in fragments:
         block_chars = len(fragment.block.text)
-        if current and current_chars + block_chars > max_chars:
+        block_tokens = token_estimator(fragment.block.text) if token_estimator else 0
+        if current and (
+            current_chars + block_chars > max_chars
+            or len(current) >= max_blocks
+            or (max_tokens > 0 and current_tokens + block_tokens > max_tokens)
+        ):
             batches.append(current)
             current = []
             current_chars = 0
+            current_tokens = 0
         current.append(fragment)
         current_chars += block_chars
+        current_tokens += block_tokens
     if current:
         batches.append(current)
     return batches
@@ -228,13 +255,20 @@ def _split_failed_batch(
 
 async def _find_llm_entities_adaptively(
     fragments: Sequence[_LLMFragment],
-    llm_types: Sequence[EntityType],
+    mask_types: Sequence[EntityType],
+    auxiliary_types: Sequence[EntityType],
     llm_client: BaseLLMClient,
     cancel_check: Callable[[], None] | None,
 ) -> dict[str, list[EntitySpan]]:
     pending: list[tuple[list[_LLMFragment], int]] = [
         (batch, 0)
-        for batch in reversed(_llm_batches(fragments, llm_client.batch_max_chars))
+        for batch in reversed(_llm_batches(
+            fragments,
+            llm_client.batch_max_chars,
+            llm_client.batch_max_blocks,
+            llm_client.batch_input_token_limit,
+            llm_client.estimate_input_tokens,
+        ))
     ]
     result: defaultdict[str, list[EntitySpan]] = defaultdict(list)
     seen: set[tuple[str, EntityType, int, int]] = set()
@@ -244,14 +278,15 @@ async def _find_llm_entities_adaptively(
             cancel_check()
         batch, depth = pending.pop()
         if request_count >= LLM_MAX_REQUESTS_PER_JOB:
-            raise LLMContextLimitError("LLM request budget exceeded")
+            raise LLMRequestBudgetError("LLM request budget exceeded")
         request_count += 1
         try:
-            spans_by_fragment = await llm_client.find_entities_in_blocks(
+            spans_by_fragment = await llm_client.find_entities_for_analysis(
                 [fragment.block for fragment in batch],
-                llm_types,
+                mask_types,
+                auxiliary_types,
             )
-        except LLMContextLimitError:
+        except (LLMContextLimitError, LLMTruncatedResponseError):
             split = (
                 _split_failed_batch(batch)
                 if depth < LLM_MAX_ADAPTIVE_DEPTH
@@ -295,18 +330,34 @@ async def detect_all(
 ) -> dict[str, list[Match]]:
     """Найти сущности во всех блоках и подготовить команды замены."""
 
-    requested = set(requested_types)
-    rule_types = _ordered_types(requested_types, RULE_BASED_TYPES)
-    llm_types = _ordered_types(requested_types, LLM_BASED_TYPES)
+    mask_types = tuple(dict.fromkeys(requested_types))
+    requested = set(mask_types)
+    analysis = set(requested)
+    if EntityType.ORGANIZATION in requested or EntityType.PERSON_NAME in requested:
+        analysis.update(AUXILIARY_ORGANIZATION_TYPES)
+    analysis_types = tuple(entity_type for entity_type in EntityType if entity_type in analysis)
+    rule_types = _ordered_types(analysis_types, RULE_BASED_TYPES)
+    hybrid_types = _ordered_types(analysis_types, HYBRID_FALLBACK_TYPES)
+    llm_types = _ordered_types(analysis_types, LLM_BASED_TYPES)
+    llm_mask_types = _ordered_types(mask_types, LLM_BASED_TYPES)
+    llm_auxiliary_types = tuple(item for item in llm_types if item not in llm_mask_types)
 
     candidates_by_index: list[list[_Candidate]] = []
+    fallback_by_index: list[list[EntitySpan]] = []
     for block in blocks:
         rule_spans = detect_rule_based(block.text, rule_types)
+        fallback_by_index.append(
+            [
+                span
+                for span in detect_rule_based(block.text, hybrid_types)
+                if _is_valid_span(span, block.text, analysis)
+            ]
+        )
         candidates_by_index.append(
             [
                 _Candidate(span=span, is_rule_based=True)
                 for span in rule_spans
-                if _is_valid_span(span, block.text, requested)
+                if _is_valid_span(span, block.text, analysis)
             ]
         )
 
@@ -316,7 +367,8 @@ async def detect_all(
         if fragments:
             llm_results = await _find_llm_entities_adaptively(
                 fragments,
-                llm_types,
+                llm_mask_types,
+                llm_auxiliary_types,
                 llm_client,
                 cancel_check,
             )
@@ -335,9 +387,22 @@ async def detect_all(
                     if _is_valid_span(span, block.text, allowed_llm_types)
                 )
 
+    # Explicitly labelled heuristics are fallbacks: any overlapping LLM span keeps
+    # its richer role metadata and confidence.
+    for candidates, fallback_spans in zip(candidates_by_index, fallback_by_index):
+        for span in fallback_spans:
+            if not any(_overlaps(span, candidate.span) for candidate in candidates):
+                candidates.append(_Candidate(span=span, is_rule_based=False))
+
     resolved_by_index = [
         _resolve_overlaps(candidates) for candidates in candidates_by_index
     ]
+
+    spans_by_block = {
+        block.block_id: spans for block, spans in zip(blocks, resolved_by_index)
+    }
+    registry = build_document_registry(blocks, spans_by_block)
+    organization_records = {item.entity_id: item for item in registry.organizations}
 
     replacements: dict[tuple[EntityType, str], str] = {}
     counters: defaultdict[EntityType, int] = defaultdict(int)
@@ -346,7 +411,11 @@ async def detect_all(
     for block, spans in zip(blocks, resolved_by_index):
         block_matches: list[Match] = []
         for span in spans:
-            replacement_key = (span.entity_type, span.text)
+            if span.entity_type not in requested:
+                continue
+            mention_key = (block.block_id, span.entity_type, span.start, span.end)
+            entity_id = registry.mention_entities.get(mention_key)
+            replacement_key = (span.entity_type, entity_id or span.text)
             replacement = replacements.get(replacement_key)
             if replacement is None:
                 counters[span.entity_type] += 1
@@ -366,7 +435,28 @@ async def detect_all(
                     source=span.source,
                     confidence=span.confidence,
                     location=block.location,
-                    party_role=span.party_role,
+                    party_role=(
+                        organization_records[entity_id].role
+                        if entity_id in organization_records
+                        else span.party_role
+                    ),
+                    entity_id=entity_id,
+                    organization_id=registry.person_organizations.get(mention_key),
+                    evidence=(
+                        organization_records[entity_id].evidence
+                        if entity_id in organization_records
+                        else tuple(
+                            relation_evidence
+                            for relation in registry.relations
+                            if relation.subject_id == entity_id
+                            for relation_evidence in relation.evidence
+                        )
+                    ),
+                    conflict=(
+                        organization_records[entity_id].conflict
+                        if entity_id in organization_records
+                        else False
+                    ),
                 )
             )
         result[block.block_id] = block_matches

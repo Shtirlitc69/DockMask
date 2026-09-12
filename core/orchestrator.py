@@ -32,6 +32,7 @@ from core.redaction.xlsx_redactor import redact_xlsx
 from core.report.report_generator import ReportGenerator, format_location, generate_report
 from llm.base import BaseLLMClient
 from llm.http_utils import LLMContextLimitError, LLMHTTPError, LLMProviderError
+from llm.request_budget import LLMRequestBudgetError, request_budget
 from llm.structured import LLMResponseError
 
 LOGGER = logging.getLogger(__name__)
@@ -83,7 +84,7 @@ def _flatten_matches(matches_by_block: Mapping[str, Iterable[Match]]) -> list[Ma
 
 
 def _question_id(match: Match) -> str:
-    return f"party:{match.entity_type.value}:{match.replacement}"
+    return f"party:{match.entity_type.value}:{match.entity_id or match.replacement}"
 
 
 def _apply_answers(
@@ -109,6 +110,33 @@ def _role_questions(
     questions: list[ClarifyingQuestion] = []
     blocks_by_id = {block.block_id: block for block in blocks}
     added: set[str] = set()
+    grouped_contexts: dict[str, list[dict[str, object]]] = {}
+    for candidate in _flatten_matches(matches_by_block):
+        candidate_id = _question_id(candidate)
+        block = blocks_by_id.get(candidate.block_id)
+        if block is None:
+            continue
+        line_start = block.text.rfind("\n", 0, candidate.start) + 1
+        line_end = block.text.find("\n", candidate.end)
+        if line_end < 0:
+            line_end = len(block.text)
+        raw_line = block.text[line_start:line_end]
+        leading_spaces = len(raw_line) - len(raw_line.lstrip())
+        text = raw_line.strip() or block.text
+        start = candidate.start - line_start - leading_spaces
+        end = candidate.end - line_start - leading_spaces
+        if not 0 <= start < end <= len(text):
+            text, start, end = block.text, candidate.start, candidate.end
+        contexts = grouped_contexts.setdefault(candidate_id, [])
+        if len(contexts) < 3:
+            contexts.append(
+                {
+                    "text": text,
+                    "location": format_location(candidate.location),
+                    "highlight_start": start,
+                    "highlight_end": end,
+                }
+            )
     for match in _flatten_matches(matches_by_block):
         if match.entity_type not in {EntityType.ORGANIZATION, EntityType.PERSON_NAME}:
             continue
@@ -151,6 +179,7 @@ def _role_questions(
                 context_location=format_location(match.location),
                 highlight_start=highlight_start,
                 highlight_end=highlight_end,
+                contexts=tuple(grouped_contexts.get(question_id, ())),
             )
         )
     return questions
@@ -208,14 +237,17 @@ async def run_pipeline(
                 extracted.blocks.extend(page_blocks)
 
         if prepared_matches is None:
-            matches_by_block = await detect_all(
-                extracted.blocks,
-                normalized_types,
-                llm_client,
-                cancel_check=cancel_check,
-            )
-            _check_cancelled(cancel_check)
-            await identify_parties(extracted.blocks, matches_by_block, llm_client)
+            with request_budget():
+                matches_by_block = await detect_all(
+                    extracted.blocks,
+                    normalized_types,
+                    llm_client,
+                    cancel_check=cancel_check,
+                )
+                _check_cancelled(cancel_check)
+                await identify_parties(
+                    extracted.blocks, matches_by_block, llm_client, cancel_check=cancel_check
+                )
         else:
             matches_by_block: dict[str, list[Match]] = {}
             for match in prepared_matches:
@@ -274,6 +306,9 @@ async def run_pipeline(
         return PipelineResult(status=JobStatus.FAILED, error_message="ocr_unavailable")
     except OcrProcessingError:
         return PipelineResult(status=JobStatus.FAILED, error_message="ocr_failed")
+    except LLMRequestBudgetError:
+        LOGGER.error("pipeline_provider_request_budget provider=%s", llm_client.provider_name)
+        return PipelineResult(status=JobStatus.FAILED, error_message="provider_request_budget")
     except LLMContextLimitError:
         LOGGER.error(
             "pipeline_provider_context_limit provider=%s",
@@ -296,9 +331,12 @@ async def run_pipeline(
             exc.status_code,
         )
         return PipelineResult(status=JobStatus.FAILED, error_message=code)
-    except LLMResponseError:
-        LOGGER.error("pipeline_provider_invalid_response provider=%s", llm_client.provider_name)
-        return PipelineResult(status=JobStatus.FAILED, error_message="provider_invalid_response")
+    except LLMResponseError as exc:
+        LOGGER.error(
+            "pipeline_provider_invalid_response provider=%s category=%s",
+            llm_client.provider_name, exc.category,
+        )
+        return PipelineResult(status=JobStatus.FAILED, error_message=f"provider_{exc.category}")
     except LLMProviderError as exc:
         LOGGER.error(
             "pipeline_provider_failed provider=%s exception_type=%s",

@@ -55,7 +55,7 @@ def is_context_limit_response(response: httpx.Response) -> bool:
 
     if response.status_code == 413:
         return True
-    if response.status_code != 400:
+    if response.status_code not in (400, 422):
         return False
     try:
         payload = response.json()

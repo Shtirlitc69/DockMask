@@ -578,6 +578,90 @@ class EntityDetectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(match.text, target)
         self.assertEqual(match.party_role, PartyRole.SUPPLIER)
 
+    async def test_unselected_inn_aggregates_organization_aliases_without_masking_it(self) -> None:
+        first_text = "ООО Альфа, ИНН 7707083893"
+        second_text = "Общество с ограниченной ответственностью «Альфа», ИНН 7707083893"
+        first_name = "ООО Альфа"
+        second_name = "Общество с ограниченной ответственностью «Альфа»"
+        client = StubLLMClient(
+            {
+                first_text: [
+                    EntitySpan(EntityType.ORGANIZATION, first_name, 0, len(first_name))
+                ],
+                second_text: [
+                    EntitySpan(EntityType.ORGANIZATION, second_name, 0, len(second_name))
+                ],
+            }
+        )
+
+        result = await detect_all(
+            [self.block("p:0", first_text), self.block("p:1", second_text)],
+            [EntityType.ORGANIZATION],
+            client,
+        )
+        matches = [item for values in result.values() for item in values]
+
+        self.assertEqual([item.entity_type for item in matches], [
+            EntityType.ORGANIZATION, EntityType.ORGANIZATION
+        ])
+        self.assertEqual(len({item.entity_id for item in matches}), 1)
+        self.assertEqual(len({item.replacement for item in matches}), 1)
+        self.assertNotIn("7707083893", [item.text for item in matches])
+
+    async def test_person_selection_uses_auxiliary_organization_without_masking_it(self) -> None:
+        text = "ООО Альфа в лице Иванова Ивана Ивановича"
+        organization = "ООО Альфа"
+        person = "Иванова Ивана Ивановича"
+        client = StubLLMClient(
+            {
+                text: [
+                    EntitySpan(EntityType.ORGANIZATION, organization, 0, len(organization)),
+                    EntitySpan(
+                        EntityType.PERSON_NAME,
+                        person,
+                        text.index(person),
+                        text.index(person) + len(person),
+                    ),
+                ]
+            }
+        )
+
+        result = await detect_all(
+            [self.block("p:0", text)], [EntityType.PERSON_NAME], client
+        )
+        matches = result["p:0"]
+
+        self.assertEqual([item.entity_type for item in matches], [EntityType.PERSON_NAME])
+        self.assertIsNotNone(matches[0].organization_id)
+        self.assertTrue(matches[0].evidence)
+
+
+def test_contract_number_accepts_pdf_nonbreaking_spaces() -> None:
+    text = "Договор\u00a0№\u00a0265/26"
+    spans = detect_rule_based(text, [EntityType.CONTRACT_NUMBER])
+
+    assert [(item.entity_type, item.text) for item in spans] == [
+        (EntityType.CONTRACT_NUMBER, "265/26")
+    ]
+
+
+def test_explicit_document_facts_have_deterministic_fallbacks() -> None:
+    text = (
+        "ГАУ КО «Стадион» в лице генерального директора "
+        "Шемарова Алексея Николаевича, юридический адрес: 236006,\n"
+        "г. Калининград, Солнечный бульвар, 25"
+    )
+    spans = detect_rule_based(
+        text,
+        [EntityType.ORGANIZATION, EntityType.PERSON_NAME, EntityType.ADDRESS],
+    )
+
+    assert {item.entity_type for item in spans} == {
+        EntityType.ORGANIZATION,
+        EntityType.PERSON_NAME,
+        EntityType.ADDRESS,
+    }
+
 
 if __name__ == "__main__":
     unittest.main()

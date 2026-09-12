@@ -19,6 +19,7 @@ class QuestionResponse(BaseModel):
     context_location: str | None = None
     highlight_start: int | None = Field(default=None, ge=0)
     highlight_end: int | None = Field(default=None, ge=1)
+    contexts: list[dict[str, object]] = Field(default_factory=list)
 
 
 class JobAnswer(BaseModel):
@@ -158,6 +159,10 @@ class ReplacementResponse(BaseModel):
     confidence: float = Field(ge=0, le=1)
     party_role: Literal["supplier", "buyer", "unknown"]
     applied: bool
+    entity_id: str | None = None
+    organization_id: str | None = None
+    evidence: list[dict[str, object]] = Field(default_factory=list)
+    conflict: bool = False
 
 
 class ReportResponse(BaseModel):

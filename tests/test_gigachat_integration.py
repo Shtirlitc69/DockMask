@@ -8,7 +8,7 @@ import unittest
 
 import httpx
 
-from core.models import EntityType
+from core.models import BlockKind, EntityType, Location, TextBlock
 from llm.gigachat_client import GigaChatClient
 
 RUN_INTEGRATION = os.getenv("GIGACHAT_RUN_INTEGRATION") == "1"
@@ -43,10 +43,18 @@ class GigaChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
             text = (
                 "Поставщик ООО Тестовый Вектор. Директор Иванов Иван Иванович."
             )
-            spans = await client.find_entities(
+            block = TextBlock(
+                "synthetic:0",
                 text,
-                [EntityType.ORGANIZATION, EntityType.PERSON_NAME],
+                BlockKind.DOCX_PARAGRAPH,
+                Location(paragraph_index=0),
             )
+            result = await client.find_entities_for_analysis(
+                [block],
+                [EntityType.ORGANIZATION],
+                [EntityType.PERSON_NAME],
+            )
+            spans = result[block.block_id]
 
         actual = {(span.entity_type, span.text) for span in spans}
         self.assertEqual(

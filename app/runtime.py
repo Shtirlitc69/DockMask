@@ -144,6 +144,20 @@ def _serialize_matches(matches: list[Match]) -> list[dict[str, object]]:
             "source": item.source,
             "confidence": item.confidence,
             "party_role": item.party_role.value,
+            "entity_id": item.entity_id,
+            "organization_id": item.organization_id,
+            "evidence": [
+                {
+                    "kind": evidence.kind.value,
+                    "block_id": evidence.block_id,
+                    "subject_id": evidence.subject_id,
+                    "object_id": evidence.object_id,
+                    "value": evidence.value,
+                    "confidence": evidence.confidence,
+                }
+                for evidence in item.evidence
+            ],
+            "conflict": item.conflict,
             "location": {
                 "paragraph_index": item.location.paragraph_index,
                 "table_index": item.location.table_index,
@@ -162,6 +176,8 @@ def _serialize_matches(matches: list[Match]) -> list[dict[str, object]]:
 
 
 def _deserialize_matches(values: list[dict[str, object]]) -> list[Match]:
+    from core.models import EvidenceKind, EvidenceRecord
+
     matches: list[Match] = []
     for value in values:
         location_value = value.get("location")
@@ -197,6 +213,23 @@ def _deserialize_matches(values: list[dict[str, object]]) -> list[Match]:
                 confidence=float(value["confidence"]),
                 location=location,
                 party_role=PartyRole(str(value["party_role"])),
+                entity_id=(str(value["entity_id"]) if value.get("entity_id") else None),
+                organization_id=(
+                    str(value["organization_id"]) if value.get("organization_id") else None
+                ),
+                evidence=tuple(
+                    EvidenceRecord(
+                        kind=EvidenceKind(str(item["kind"])),
+                        block_id=str(item["block_id"]),
+                        subject_id=str(item["subject_id"]),
+                        object_id=(str(item["object_id"]) if item.get("object_id") else None),
+                        value=(str(item["value"]) if item.get("value") else None),
+                        confidence=float(item.get("confidence", 1.0)),
+                    )
+                    for item in value.get("evidence", [])
+                    if isinstance(item, dict)
+                ),
+                conflict=bool(value.get("conflict", False)),
             )
         )
     return matches
@@ -790,6 +823,7 @@ async def create_runtime(
                             "context_location": item.context_location,
                             "highlight_start": item.highlight_start,
                             "highlight_end": item.highlight_end,
+                            "contexts": list(item.contexts),
                         }
                         for item in result.open_questions
                     ]
