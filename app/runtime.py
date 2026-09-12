@@ -63,6 +63,7 @@ from core.models import (
 )
 from core.orchestrator import PipelineCancelled, run_pipeline
 from core.preview import build_preview
+from core.redaction.options import LabelStyle, format_label
 from core.report.report_generator import format_location
 from llm import (
     GigaChatScope,
@@ -509,6 +510,7 @@ class RuntimeJobService:
         *,
         file: UploadFile,
         entity_types,
+        label_style: LabelStyle = LabelStyle.FULL,
     ) -> JobCreateResponse:
         job_id = str(uuid4())
         filename = file.filename or "document"
@@ -520,6 +522,7 @@ class RuntimeJobService:
             source_filename=filename,
             document_format=document_format,
             entity_types=entity_types,
+            label_style=label_style,
             input_path=str(source),
             config=config,
         )
@@ -659,6 +662,10 @@ class RuntimeJobService:
                 build_preview,
                 record.output_path,
                 [item.replacement for item in report.replacements],
+                marker_aliases={
+                    format_label(item.replacement, item.entity_type, record.label_style):
+                    item.replacement for item in report.replacements
+                },
             )
             return PreviewResponse(
                 format=record.document_format,
@@ -769,6 +776,7 @@ async def create_runtime(
                             files.job_dir(job_id),
                             record.entity_types,
                             client,
+                            label_style=record.label_style,
                             answers=record.answers,
                             prepared_matches=(
                                 _deserialize_matches(record.pending_matches)

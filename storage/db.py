@@ -63,6 +63,10 @@ class Database:
             )
         if "scope" not in columns:
             await connection.execute("ALTER TABLE jobs ADD COLUMN scope TEXT")
+        if "label_style" not in columns:
+            await connection.execute(
+                "ALTER TABLE jobs ADD COLUMN label_style TEXT NOT NULL DEFAULT 'full'"
+            )
         config_columns = {
             row[1]
             for row in await (await connection.execute("PRAGMA table_info(app_config)")).fetchall()

@@ -1,6 +1,7 @@
 """Offline regressions for GigaChat generation safeguards."""
 
 import asyncio
+import json
 import unittest
 
 import httpx
@@ -94,6 +95,32 @@ class RequestSafetyTests(unittest.IsolatedAsyncioTestCase):
         client = self.make_client(handler)
         with self.assertRaises(LLMContextLimitError):
             await client.find_entities("Я" * 40_000, [EntityType.ORGANIZATION])
+
+    async def test_corrupt_schema_response_retries_prompt_schema_with_validation(self):
+        bodies = []
+
+        def handler(request):
+            if request.url.path == "/api/v2/oauth":
+                return token_response(request)
+            body = json.loads(request.content)
+            bodies.append(body)
+            if body["response_format"]["type"] == "json_schema":
+                return chat_response(request, '{"entities": [garbage]}')
+            return chat_response(request, entities_content({
+                "type": "person_name", "text": "Alice Example",
+            }))
+
+        client = self.make_client(handler)
+        client._min_interval = 0
+        with request_budget(3) as budget:
+            first = await client.find_entities("Alice Example", [EntityType.PERSON_NAME])
+            second = await client.find_entities("Alice Example", [EntityType.PERSON_NAME])
+        self.assertEqual(len(first), 1)
+        self.assertEqual(len(second), 1)
+        self.assertEqual(budget.used, 3)
+        self.assertEqual([b["response_format"]["type"] for b in bodies],
+                         ["json_schema", "text", "text"])
+        self.assertIn('"required"', bodies[1]["messages"][0]["content"])
 
     async def test_large_document_is_bounded_and_truncation_splits(self):
         calls = 0

@@ -11,6 +11,7 @@ from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
 from core.models import Match
+from core.redaction.options import LabelStyle, display_label
 
 
 def _clone_run_after(paragraph: Paragraph, anchor: Run, text: str) -> Run:
@@ -39,6 +40,8 @@ class DocxRedactor:
         source_file: str | Path,
         output_file: str | Path,
         matches_by_block: dict[str, list[Match]],
+        *,
+        label_style: LabelStyle | str = LabelStyle.FULL,
     ) -> Path:
         source_path = Path(source_file)
         target_path = Path(output_file)
@@ -49,7 +52,7 @@ class DocxRedactor:
         for block_id, matches in matches_by_block.items():
             paragraph = self._resolve_paragraph(document, block_id)
             if paragraph is not None:
-                self._apply_to_paragraph(paragraph, matches)
+                self._apply_to_paragraph(paragraph, matches, label_style)
 
         target_path.parent.mkdir(parents=True, exist_ok=True)
         document.save(str(target_path))
@@ -76,7 +79,9 @@ class DocxRedactor:
             return None
 
     @staticmethod
-    def _apply_to_paragraph(paragraph: Paragraph, matches: list[Match]) -> None:
+    def _apply_to_paragraph(
+        paragraph: Paragraph, matches: list[Match], label_style=LabelStyle.FULL
+    ) -> None:
         accepted: list[Match] = []
         occupied: list[tuple[int, int]] = []
         source_text = paragraph.text
@@ -87,14 +92,14 @@ class DocxRedactor:
                 continue
             if any(match.start < end and start < match.end for start, end in occupied):
                 continue
-            if DocxRedactor._replace_span(paragraph, match):
+            if DocxRedactor._replace_span(paragraph, match, label_style):
                 occupied.append((match.start, match.end))
                 accepted.append(match)
         for match in accepted:
             match.applied = True
 
     @staticmethod
-    def _replace_span(paragraph: Paragraph, match: Match) -> bool:
+    def _replace_span(paragraph: Paragraph, match: Match, label_style=LabelStyle.FULL) -> bool:
         runs = list(paragraph.runs)
         if not runs:
             return False
@@ -112,13 +117,21 @@ class DocxRedactor:
 
         if start_index == end_index:
             suffix_run = _clone_run_after(paragraph, start_run, suffix)
-            replacement_run = _clone_run_after(paragraph, start_run, match.replacement)
+            replacement_run = _clone_run_after(
+                paragraph,
+                start_run,
+                display_label(match, label_style) or " " * max(1, len(match.text)),
+            )
             replacement_run._r.addnext(suffix_run._r)
         else:
             for run in runs[start_index + 1 : end_index]:
                 run.text = ""
             end_run.text = suffix
-            replacement_run = _clone_run_after(paragraph, start_run, match.replacement)
+            replacement_run = _clone_run_after(
+                paragraph,
+                start_run,
+                display_label(match, label_style) or " " * max(1, len(match.text)),
+            )
 
         replacement_run.font.highlight_color = WD_COLOR_INDEX.YELLOW
         replacement_run.font.bold = True
@@ -129,5 +142,9 @@ def redact_docx(
     source_file: str | Path,
     output_file: str | Path,
     matches_by_block: dict[str, list[Match]],
+    *,
+    label_style: LabelStyle | str = LabelStyle.FULL,
 ) -> Path:
-    return DocxRedactor().redact(source_file, output_file, matches_by_block)
+    return DocxRedactor().redact(
+        source_file, output_file, matches_by_block, label_style=label_style
+    )

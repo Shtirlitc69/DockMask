@@ -8,6 +8,7 @@ from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 
 from core.models import Match
+from core.redaction.options import LabelStyle, display_label
 
 HIGHLIGHT_FILL = PatternFill("solid", fgColor="FFF59D")
 
@@ -16,6 +17,8 @@ def redact_xlsx(
     source_file: str | Path,
     output_file: str | Path,
     matches_by_block: dict[str, list[Match]],
+    *,
+    label_style: LabelStyle | str = LabelStyle.FULL,
 ) -> Path:
     source = Path(source_file)
     target = Path(output_file)
@@ -38,7 +41,11 @@ def redact_xlsx(
                     continue
                 if text[match.start : match.end] != match.text:
                     continue
-                cell.value = text[: match.start] + match.replacement + text[match.end :]
+                cell.value = (
+                    text[: match.start]
+                    + (display_label(match, label_style) or " " * len(match.text))
+                    + text[match.end :]
+                )
                 cell.fill = HIGHLIGHT_FILL
                 match.applied = True
         target.parent.mkdir(parents=True, exist_ok=True)

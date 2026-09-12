@@ -29,6 +29,7 @@ from app.schemas import (
     ReportResponse,
 )
 from core.models import EntityType
+from core.redaction.options import LabelStyle
 
 
 class ServiceUnavailableError(RuntimeError):
@@ -67,6 +68,7 @@ class JobService(Protocol):
         *,
         file: UploadFile,
         entity_types: tuple[EntityType, ...],
+        label_style: LabelStyle = LabelStyle.FULL,
     ) -> JobCreateResponse: ...
 
     async def get_job(self, job_id: str) -> JobStatusResponse: ...
@@ -116,6 +118,7 @@ class UnavailableJobService:
         *,
         file: UploadFile,
         entity_types: tuple[EntityType, ...],
+        label_style: LabelStyle = LabelStyle.FULL,
     ) -> JobCreateResponse:
         del file, entity_types
         raise ServiceUnavailableError()

@@ -11,6 +11,18 @@ afterEach(() => {
 })
 
 describe("local API client", () => {
+  it("sends the selected label style with the document", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ job_id: "test", status: "queued" })),
+    )
+    await new ApiClient().createJob({
+      file: new File(["pdf"], "test.pdf"), entityTypes: ["email"], labelStyle: "none",
+    })
+    const form = fetchMock.mock.calls[0][1]?.body as FormData
+    expect(form.get("label_style")).toBe("none")
+    expect(form.getAll("entity_types")).toEqual(["email"])
+  })
+
   it("sends a write-only key only to the local config endpoint", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ feature_flags: {}, has_api_key: true }), {

@@ -9,6 +9,7 @@ from pathlib import Path
 import fitz
 
 from core.models import Match
+from core.redaction.options import LabelStyle, display_label
 
 
 def _cyrillic_font_path() -> Path:
@@ -20,86 +21,114 @@ def _cyrillic_font_path() -> Path:
     raise RuntimeError("cyrillic_pdf_font_unavailable")
 
 
+def _text_rects(raw_blocks: list[dict], match: Match) -> list[fitz.Rect]:
+    """Map extractor offsets to characters, including every line of one occurrence."""
+    for block in raw_blocks:
+        if block.get("type") != 0:
+            continue
+        if match.location.bbox is not None and any(
+            abs(a - b) > 0.1 for a, b in zip(block["bbox"], match.location.bbox)
+        ):
+            continue
+        text = ""
+        lines = []
+        for line in block["lines"]:
+            chars = [char for span in line["spans"] for char in span["chars"]]
+            lines.append((len(text), chars))
+            text += "".join(char["c"] for char in chars) + "\n"
+        if text[match.start : match.end] != match.text:
+            continue
+        rects = []
+        for offset, chars in lines:
+            selected = chars[max(0, match.start - offset) : max(0, match.end - offset)]
+            if selected:
+                rect = fitz.Rect(selected[0]["bbox"])
+                for char in selected[1:]:
+                    rect |= fitz.Rect(char["bbox"])
+                rects.append(rect)
+        return rects
+    return []
+
+
+def _ocr_rects(match: Match) -> list[fitz.Rect]:
+    # Keep lines separate: a union across lines erases unrelated surrounding text.
+    rects: list[fitz.Rect] = []
+    for start, end, *bbox in match.location.ocr_words or ():
+        if start >= match.end or end <= match.start:
+            continue
+        rect = fitz.Rect(bbox)
+        if rects and abs(rect.y0 - rects[-1].y0) < min(rect.height, rects[-1].height) * 0.5:
+            rects[-1] |= rect
+        else:
+            rects.append(rect)
+    return rects
+
+
+def _draw_label(page, rect, label, font, font_path):
+    if not label:
+        return
+    # Fit actual font metrics and centre the baseline; never ignore textbox failure.
+    width = max(font.text_length(label, fontsize=1), 1)
+    size = min(10.0, (rect.width - 2) / width, (rect.height - 1) / (font.ascender - font.descender))
+    if size <= 0:
+        return
+    x = rect.x0 + (rect.width - width * size) / 2
+    y = rect.y0 + (rect.height - size * (font.ascender - font.descender)) / 2
+    y += size * font.ascender
+    page.insert_text(
+        (x, y),
+        label,
+        fontname="dockmask",
+        fontfile=str(font_path),
+        fontsize=size,
+        color=(0, 0, 0),
+        overlay=True,
+    )
+
+
 def redact_pdf(
     source_file: str | Path,
     output_file: str | Path,
     matches_by_block: dict[str, list[Match]],
+    *,
+    label_style: LabelStyle | str = LabelStyle.FULL,
 ) -> Path:
-    source = Path(source_file)
-    target = Path(output_file)
+    source, target = Path(source_file), Path(output_file)
     if source.resolve() == target.resolve():
         raise ValueError("output_file must differ from source_file")
-
-    document = fitz.open(source)
-    try:
-        occurrences: defaultdict[tuple[int, str], int] = defaultdict(int)
-        touched_pages: set[int] = set()
-        replacements: defaultdict[int, list[tuple[fitz.Rect, str]]] = defaultdict(list)
-        for block_id, matches in matches_by_block.items():
+    style = LabelStyle(label_style)
+    with fitz.open(source) as document:
+        replacements = defaultdict(list)
+        page_blocks = {}
+        for matches in matches_by_block.values():
             for match in sorted(matches, key=lambda item: (item.start, item.end)):
-                location = match.location
-                if location.page_number is None or location.page_number >= document.page_count:
+                number = match.location.page_number
+                if number is None or not 0 <= number < document.page_count:
                     continue
-                page = document[location.page_number]
-                if location.ocr_words:
-                    word_rects = [
-                        fitz.Rect(word[2:])
-                        for word in location.ocr_words
-                        if word[0] < match.end and word[1] > match.start
-                    ]
-                    if not word_rects:
-                        continue
-                    candidate = word_rects[0]
-                    for word_rect in word_rects[1:]:
-                        candidate |= word_rect
-                    page.add_redact_annot(
-                        candidate,
-                        fill=(1, 1, 0.55),
-                        cross_out=False,
-                    )
-                    replacements[location.page_number].append((candidate, match.replacement))
-                    touched_pages.add(location.page_number)
-                    match.applied = True
-                    continue
-                candidates = page.search_for(match.text)
-                if location.bbox is not None:
-                    block_rect = fitz.Rect(location.bbox)
-                    candidates = [rect for rect in candidates if rect.intersects(block_rect)]
-                key = (location.page_number, f"{block_id}\0{match.text}")
-                index = occurrences[key]
-                occurrences[key] += 1
-                if index >= len(candidates):
-                    continue
-                page.add_redact_annot(
-                    candidates[index],
-                    fill=(1, 1, 0.55),
-                    cross_out=False,
+                page = document[number]
+                if not match.location.ocr_words and number not in page_blocks:
+                    page_blocks[number] = page.get_text("rawdict", sort=True)["blocks"]
+                rects = (
+                    _ocr_rects(match) if match.location.ocr_words
+                    else _text_rects(page_blocks[number], match)
                 )
-                replacements[location.page_number].append(
-                    (candidates[index], match.replacement)
+                if not rects:
+                    continue
+                for rect in rects:
+                    page.add_redact_annot(rect, fill=(1, 1, 0.55), cross_out=False)
+                # One centred label on the widest line of a multiline entity.
+                replacements[number].append(
+                    (max(rects, key=lambda r: r.width), display_label(match, style))
                 )
-                touched_pages.add(location.page_number)
                 match.applied = True
-        font_path = _cyrillic_font_path() if replacements else None
+        font_path = _cyrillic_font_path() if replacements and style != LabelStyle.NONE else None
         font = fitz.Font(fontfile=str(font_path)) if font_path else None
-        for page_number in touched_pages:
-            page = document[page_number]
-            page.apply_redactions()
-            for rect, replacement in replacements[page_number]:
-                assert font is not None and font_path is not None
-                unit_width = max(font.text_length(replacement, fontsize=1), 1)
-                font_size = min(8.0, max(3.0, rect.width / unit_width * 0.95))
-                page.insert_textbox(
-                    rect,
-                    replacement,
-                    fontname="dockmask",
-                    fontfile=str(font_path),
-                    fontsize=font_size,
-                    color=(0, 0, 0),
-                    overlay=True,
-                )
+        for number, labels in replacements.items():
+            page = document[number]
+            page.apply_redactions(graphics=0)
+            for rect, label in labels:
+                if font is not None:
+                    _draw_label(page, rect, label, font, font_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         document.save(target, garbage=4, deflate=True)
-    finally:
-        document.close()
     return target

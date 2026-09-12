@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import Self
 from uuid import uuid4
@@ -137,6 +138,7 @@ class GigaChatClient(StructuredLLMClient):
         if min_interval_seconds < 0:
             raise ValueError("min_interval_seconds must be nonnegative")
         self._output_tokens = output_tokens
+        self._schema_in_prompt = False
         self.batch_input_token_limit = self._context_tokens - self._output_tokens - 2048
         self._min_interval = min_interval_seconds
 
@@ -232,9 +234,23 @@ class GigaChatClient(StructuredLLMClient):
             if delay > 0:
                 await asyncio.sleep(delay)
             try:
-                return await self._complete_serialized(
-                    prompt, response_schema, system_prompt=system_prompt
+                content = await self._complete_serialized(
+                    prompt, response_schema, system_prompt=system_prompt,
+                    schema_in_prompt=self._schema_in_prompt,
                 )
+                try:
+                    json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip()))
+                except (ValueError, TypeError):
+                    if self._schema_in_prompt:
+                        return content  # Shared validator rejects it; adaptive splitting is bounded.
+                    # Some model versions corrupt repeated JSON schema fields. Retry once
+                    # with a schema in the prompt; local validation remains strict.
+                    await asyncio.sleep(self._min_interval)
+                    content = await self._complete_serialized(
+                        prompt, response_schema, system_prompt=system_prompt, schema_in_prompt=True,
+                    )
+                    self._schema_in_prompt = True
+                return content
             finally:
                 gate.ready_at = max(gate.ready_at, time.monotonic() + self._min_interval)
 
@@ -244,13 +260,20 @@ class GigaChatClient(StructuredLLMClient):
         response_schema: dict[str, object],
         *,
         system_prompt: str | None = None,
+        schema_in_prompt: bool = False,
     ) -> str:
         messages = []
+        if schema_in_prompt:
+            system_prompt = (system_prompt or "") + "\nВерни JSON по этой схеме: " + json.dumps(
+                response_schema, ensure_ascii=False, separators=(",", ":")
+            )
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
         payload = {
             "model": self._model,
+            "temperature": 0.1,
+            "repetition_penalty": 1.0,
             "max_tokens": self._output_tokens,
             "messages": messages,
             "response_format": {
@@ -259,6 +282,8 @@ class GigaChatClient(StructuredLLMClient):
                 "strict": True,
             },
         }
+        if schema_in_prompt:
+            payload["response_format"] = {"type": "text"}
         # UTF-8 bytes deliberately overestimate tokens; includes schema and framing.
         estimated_tokens = len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) + 256
         if estimated_tokens + self._output_tokens > self._context_tokens:

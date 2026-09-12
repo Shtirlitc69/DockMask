@@ -36,6 +36,7 @@ from app.schemas import (
     ReportResponse,
 )
 from core.models import DocumentFormat, EntityType
+from core.redaction.options import LabelStyle
 
 MAX_UPLOAD_SIZE_BYTES = 50 * 1024 * 1024
 _DOCUMENT_FORMATS = {item.value: item for item in DocumentFormat}
@@ -113,10 +114,14 @@ async def create_job(
     service: JobServiceDependency,
     file: Annotated[UploadFile | None, File()] = None,
     entity_types: Annotated[list[str] | None, Form()] = None,
+    label_style: Annotated[LabelStyle, Form()] = LabelStyle.FULL,
 ) -> JobCreateResponse:
     upload, parsed_types = await _validated_upload(file, entity_types)
     try:
-        return await service.create_job(file=upload, entity_types=parsed_types)
+        return await service.create_job(
+            file=upload, entity_types=parsed_types,
+            **({"label_style": label_style} if label_style != LabelStyle.FULL else {}),
+        )
     except ServiceUnavailableError as exc:
         _raise_service_error(exc)
 

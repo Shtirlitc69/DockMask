@@ -27,6 +27,7 @@ from core.models import (
     TextBlock,
 )
 from core.redaction.docx_redactor import redact_docx
+from core.redaction.options import LabelStyle
 from core.redaction.pdf_redactor import redact_pdf
 from core.redaction.xlsx_redactor import redact_xlsx
 from core.report.report_generator import ReportGenerator, format_location, generate_report
@@ -191,6 +192,7 @@ async def run_pipeline(
     requested_types: Iterable[EntityType | str],
     llm_client: BaseLLMClient | None = None,
     *,
+    label_style: LabelStyle | str = LabelStyle.FULL,
     answers: Mapping[str, str] | None = None,
     prepared_matches: Iterable[Match] | None = None,
     use_ocr: bool = False,
@@ -267,6 +269,7 @@ async def run_pipeline(
             source,
             staged_document,
             matches_by_block,
+            label_style=label_style,
         )
         _check_cancelled(cancel_check)
         flat_matches = _flatten_matches(matches_by_block)

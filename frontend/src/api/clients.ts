@@ -111,6 +111,7 @@ export class ApiClient {
     const form = new FormData()
 
     form.append("file", request.file)
+    form.append("label_style", request.labelStyle ?? "full")
 
     for (const entityType of request.entityTypes)
       form.append("entity_types", entityType)

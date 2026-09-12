@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -13,12 +14,13 @@ from core.models import (
     EntitySpan,
     EntityType,
     Match,
+    PartyRole,
     TextBlock,
 )
 from llm.base import BaseLLMClient
 from llm.http_utils import LLMContextLimitError
 from llm.request_budget import LLMRequestBudgetError
-from llm.structured import LLMTruncatedResponseError
+from llm.structured import LLMResponseError
 
 RULE_BASED_TYPES = frozenset(
     {
@@ -286,7 +288,11 @@ async def _find_llm_entities_adaptively(
                 mask_types,
                 auxiliary_types,
             )
-        except (LLMContextLimitError, LLMTruncatedResponseError):
+        except (LLMContextLimitError, LLMResponseError) as exc:
+            if isinstance(exc, LLMResponseError) and exc.category not in {
+                "invalid_response", "response_truncated"
+            }:
+                raise
             split = (
                 _split_failed_batch(batch)
                 if depth < LLM_MAX_ADAPTIVE_DEPTH
@@ -398,6 +404,31 @@ async def detect_all(
         _resolve_overlaps(candidates) for candidates in candidates_by_index
     ]
 
+    # Complete confirmed values across the whole document (including other batches).
+    # Whitespace may change at PDF line wraps. Never match inside a longer word,
+    # invent an alias, or carry a contextual party role into a different block.
+    seeds = {}
+    for spans in resolved_by_index:
+        for span in spans:
+            if span.entity_type in LLM_BASED_TYPES and len(span.text.strip()) >= 3:
+                seeds.setdefault((span.entity_type, " ".join(span.text.split())), span)
+    for (entity_type, value), seed in seeds.items():
+        pattern = re.compile(
+            (r"(?<!\w)" if value[0].isalnum() else "")
+            + r"\s+".join(re.escape(part) for part in value.split())
+            + (r"(?!\w)" if value[-1].isalnum() else "")
+        )
+        for block, spans in zip(blocks, resolved_by_index):
+            for found in pattern.finditer(block.text):
+                if any(found.start() < span.end and span.start < found.end() for span in spans):
+                    continue
+                spans.append(EntitySpan(
+                    entity_type=entity_type, text=found.group(),
+                    start=found.start(), end=found.end(), source="document_repeat",
+                    confidence=seed.confidence, party_role=PartyRole.UNKNOWN,
+                ))
+            spans.sort(key=lambda span: (span.start, span.end))
+
     spans_by_block = {
         block.block_id: spans for block, spans in zip(blocks, resolved_by_index)
     }
@@ -415,7 +446,7 @@ async def detect_all(
                 continue
             mention_key = (block.block_id, span.entity_type, span.start, span.end)
             entity_id = registry.mention_entities.get(mention_key)
-            replacement_key = (span.entity_type, entity_id or span.text)
+            replacement_key = (span.entity_type, entity_id or " ".join(span.text.split()))
             replacement = replacements.get(replacement_key)
             if replacement is None:
                 counters[span.entity_type] += 1

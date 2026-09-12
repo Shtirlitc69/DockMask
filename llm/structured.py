@@ -129,7 +129,17 @@ def to_entity_spans(
         if not entity.text:
             logger.warning("LLM returned an empty entity value for type %s", entity_type.value)
             continue
-        matches = tuple(re.finditer(re.escape(entity.text), source_text))
+        # Models may replace a PDF line wrap with a space. Locate only whitespace
+        # variants and retain original characters and offsets, never fuzzy names.
+        parts = entity.text.split()
+        pattern = r"\s+".join(re.escape(part) for part in parts)
+        if not pattern:
+            continue
+        if entity.text[0].isalnum():
+            pattern = r"(?<!\w)" + pattern
+        if entity.text[-1].isalnum():
+            pattern += r"(?!\w)"
+        matches = tuple(re.finditer(pattern, source_text))
         if not matches:
             logger.warning(
                 "LLM entity value was absent from source text for type %s",
@@ -240,27 +250,15 @@ class StructuredLLMClient(BaseLLMClient):
             if entity_type not in requested or not entity.text:
                 LOGGER.warning("LLM returned an invalid batch entity")
                 continue
-            start = 0
-            while True:
-                start = block.text.find(entity.text, start)
-                if start < 0:
-                    break
-                end = start + len(entity.text)
-                identity = (entity.block_id, entity_type, start, end)
+            for span in to_entity_spans(
+                block.text, frozenset(requested),
+                [EntityItem(type=entity.type, text=entity.text, party_role=entity.party_role)],
+                source=self.source, confidence=self.confidence,
+            ):
+                identity = (entity.block_id, span.entity_type, span.start, span.end)
                 if identity not in seen:
                     seen.add(identity)
-                    result[block.block_id].append(
-                        EntitySpan(
-                            entity_type=entity_type,
-                            text=entity.text,
-                            start=start,
-                            end=end,
-                            source=self.source,
-                            confidence=self.confidence,
-                            party_role=PartyRole(entity.party_role),
-                        )
-                    )
-                start = end
+                    result[block.block_id].append(span)
         for spans in result.values():
             spans.sort(key=lambda span: (span.start, span.end, span.entity_type.value))
         return result
@@ -298,19 +296,15 @@ class StructuredLLMClient(BaseLLMClient):
                 continue
             if block is None or entity_type not in selected or not entity.text:
                 continue
-            start = 0
-            while (start := block.text.find(entity.text, start)) >= 0:
-                end = start + len(entity.text)
-                identity = (entity.block_id, entity_type, start, end)
+            for span in to_entity_spans(
+                block.text, frozenset(requested),
+                [EntityItem(type=entity.type, text=entity.text, party_role=entity.party_role)],
+                source=self.source, confidence=self.confidence,
+            ):
+                identity = (entity.block_id, span.entity_type, span.start, span.end)
                 if identity not in seen:
                     seen.add(identity)
-                    result[block.block_id].append(
-                        EntitySpan(
-                            entity_type, entity.text, start, end, self.source,
-                            self.confidence, PartyRole(entity.party_role),
-                        )
-                    )
-                start = end
+                    result[block.block_id].append(span)
         for spans in result.values():
             spans.sort(key=lambda span: (span.start, span.end, span.entity_type.value))
         return result

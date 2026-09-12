@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from core.models import DocumentFormat, EntityType, JobStatus
+from core.redaction.options import LabelStyle
 from llm.types import LLMClientConfig, ProviderId
 from storage.db import Database
 
@@ -36,6 +37,7 @@ class JobRecord:
     model: str
     base_url: str | None
     scope: str | None
+    label_style: LabelStyle = LabelStyle.FULL
 
 
 class JobsRepository:
@@ -51,14 +53,15 @@ class JobsRepository:
         entity_types: tuple[EntityType, ...],
         input_path: str,
         config: LLMClientConfig,
+        label_style: LabelStyle = LabelStyle.FULL,
     ) -> None:
         now = _now()
         connection = self._database.require_connection()
         await connection.execute(
             """INSERT INTO jobs (
                 job_id, status, source_filename, document_format, entity_types,
-                input_path, provider, model, base_url, scope, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                input_path, provider, model, base_url, scope, created_at, updated_at, label_style
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 job_id,
                 JobStatus.QUEUED.value,
@@ -72,6 +75,7 @@ class JobsRepository:
                 config.scope,
                 now,
                 now,
+                LabelStyle(label_style).value,
             ),
         )
         await connection.commit()
@@ -104,6 +108,7 @@ class JobsRepository:
             model=row["model"],
             base_url=row["base_url"],
             scope=row["scope"],
+            label_style=LabelStyle(row["label_style"]),
         )
 
     async def list_queued(self) -> list[str]:

@@ -432,6 +432,8 @@ class GigaChatClientTests(unittest.IsolatedAsyncioTestCase):
             httpx.URL("https://api.giga.chat/v1/chat/completions"),
         )
         self.assertEqual(body["model"], MODEL)
+        self.assertEqual(body["temperature"], 0.1)
+        self.assertEqual(body["repetition_penalty"], 1.0)
         self.assertEqual(chat_request.headers["User-Agent"], "DockMask/0.1")
         self.assertEqual(body["response_format"]["type"], "json_schema")
         self.assertTrue(body["response_format"]["strict"])

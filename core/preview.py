@@ -171,9 +171,11 @@ def build_preview(
     replacements: list[str],
     *,
     limit: int = MAX_PREVIEW_CHARS,
+    marker_aliases: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
     source = Path(path)
-    markers = tuple(sorted(set(replacements), key=len, reverse=True))
+    aliases = marker_aliases if marker_aliases is not None else {item: item for item in replacements}
+    markers = tuple(sorted((item for item in aliases if item), key=len, reverse=True))
     budget = _Budget(limit)
     suffix = source.suffix.casefold()
     if suffix == ".docx":
@@ -184,4 +186,11 @@ def build_preview(
         elements = _pdf_preview(source, markers, budget)
     else:
         raise ValueError("unsupported preview format")
+    for element in elements:
+        groups = [element.get("segments", [])]
+        groups.extend(cell["segments"] for row in element.get("rows", []) for cell in row)
+        for group in groups:
+            for segment in group:
+                if segment.get("replacement"):
+                    segment["replacement"] = aliases[segment["replacement"]]
     return elements, budget.truncated

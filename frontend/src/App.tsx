@@ -1,3 +1,4 @@
+import type { LabelStyle } from "./api/dto"
 import { useState, useCallback, useRef, useMemo, useEffect } from "react"
 
 import { apiClient, ApiError, saveBlobInBrowser } from "./api/clients"
@@ -1179,6 +1180,8 @@ function StepBreadcrumb({ step }: { step: AppStep }) {
 // ---------------------------------------------------------------------------
 
 function UploadView({
+  labelStyle,
+  onLabelStyleChange,
   file,
   dataTypes,
   isDragging,
@@ -1193,6 +1196,8 @@ function UploadView({
   onToggleType,
   onProcess,
 }: {
+  labelStyle: LabelStyle
+  onLabelStyleChange: (style: LabelStyle) => void
   file: UploadedFile | null
 
   dataTypes: DataTypeOption[]
@@ -1346,6 +1351,19 @@ function UploadView({
             </button>
           )}
 
+          <label className="flex flex-col gap-2 text-sm">
+            Подписи на масках
+            <select aria-label="Подписи на масках" value={labelStyle}
+              onChange={(e) => onLabelStyleChange(e.target.value as LabelStyle)}
+              className="rounded border p-2" style={{ background: "var(--background)", color: "var(--foreground)" }}>
+              <option value="full">Полные — [ОРГАНИЗАЦИЯ_2]</option>
+              <option value="short">Короткие — [ОРГ_2]</option>
+              <option value="none">Без подписей — только заливка</option>
+            </select>
+            <span className="text-xs" style={{ color: "var(--muted-foreground)" }}>
+              Для узких полей PDF выбирайте короткие подписи. Идентификаторы сохраняются в отчёте.
+            </span>
+          </label>
           {/* Process button */}
           {file && (
             <button
@@ -1946,6 +1964,7 @@ export default function App() {
   const [theme, setTheme] = useState<Theme>("dark")
   const [step, setStep] = useState<AppStep>("upload")
   const [file, setFile] = useState<UploadedFile | null>(null)
+  const [labelStyle, setLabelStyle] = useState<LabelStyle>("full")
   const [nativeFile, setNativeFile] = useState<File | null>(null)
   const [dataTypes, setDataTypes] =
     useState<DataTypeOption[]>(DATA_TYPE_OPTIONS)
@@ -2154,6 +2173,7 @@ export default function App() {
     try {
       const created = await apiClient.createJob({
         file: nativeFile,
+        labelStyle,
         entityTypes: dataTypes
           .filter((item) => item.selected)
           .map((item) => item.id as EntityType),
@@ -2173,7 +2193,7 @@ export default function App() {
       setError(reason instanceof ApiError ? reason.code : "connection_failed")
       setStep("upload")
     }
-  }, [dataTypes, nativeFile])
+  }, [dataTypes, nativeFile, labelStyle])
 
   const handleAnswer = useCallback((qId: string, answer: string) => {
     setQuestions((prev) =>
@@ -2290,7 +2310,7 @@ export default function App() {
             🔒
           </div>
           <span className="font-semibold text-base tracking-tight">
-            DocMask
+            DockMask
           </span>
         </div>
 
@@ -2343,6 +2363,8 @@ export default function App() {
         )}
         {step === "upload" && (
           <UploadView
+            labelStyle={labelStyle}
+            onLabelStyleChange={setLabelStyle}
             file={file}
             dataTypes={dataTypes}
             isDragging={isDragging}

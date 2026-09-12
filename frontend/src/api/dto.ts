@@ -2,7 +2,10 @@ export type JobStatus = "queued" | "processing" | "needs_clarification" | "cance
 
 export type EntityType = "person_name" | "organization" | "address" | "amount" | "inn" | "kpp" | "ogrn" | "phone" | "email" | "bank_account" | "bik" | "contract_number"
 
+export type LabelStyle = "full" | "short" | "none"
+
 export interface CreateJobRequest {
+  labelStyle?: LabelStyle
   file: File
 
   entityTypes: EntityType[]
