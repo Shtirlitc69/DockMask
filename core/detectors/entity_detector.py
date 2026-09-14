@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
+from core.context import enrich_context, monetary_column
 from core.detectors.rule_based import detect_rule_based
 from core.document_registry import build_document_registry
 from core.models import (
@@ -17,6 +19,7 @@ from core.models import (
     PartyRole,
     TextBlock,
 )
+from core.telemetry import progress, record
 from llm.base import BaseLLMClient
 from llm.http_utils import LLMContextLimitError
 from llm.request_budget import LLMRequestBudgetError
@@ -24,6 +27,7 @@ from llm.structured import LLMResponseError
 
 RULE_BASED_TYPES = frozenset(
     {
+        EntityType.AMOUNT,
         EntityType.INN,
         EntityType.KPP,
         EntityType.OGRN,
@@ -76,7 +80,9 @@ def _ordered_types(
     supported_types: frozenset[EntityType],
 ) -> tuple[EntityType, ...]:
     requested = set(requested_types)
-    return tuple(entity_type for entity_type in EntityType if entity_type in requested & supported_types)
+    return tuple(
+        entity_type for entity_type in EntityType if entity_type in requested & supported_types
+    )
 
 
 def _is_valid_span(
@@ -116,7 +122,7 @@ def _overlaps(left: EntitySpan, right: EntitySpan) -> bool:
     return left.start < right.end and right.start < left.end
 
 
-def _resolve_overlaps(candidates: Sequence[_Candidate]) -> list[EntitySpan]:
+def _resolve_overlaps(candidates: Sequence[_Candidate], block_id: str = "") -> list[EntitySpan]:
     selected: list[EntitySpan] = []
     seen: set[tuple[EntityType, str, int, int]] = set()
 
@@ -124,8 +130,24 @@ def _resolve_overlaps(candidates: Sequence[_Candidate]) -> list[EntitySpan]:
         span = candidate.span
         identity = (span.entity_type, span.text, span.start, span.end)
         if identity in seen:
+            record(
+                "candidate_rejected",
+                reason="duplicate",
+                block_id=block_id,
+                entity_type=span.entity_type.value,
+                start=span.start,
+                end=span.end,
+            )
             continue
         if any(_overlaps(span, existing) for existing in selected):
+            record(
+                "candidate_rejected",
+                reason="overlap",
+                block_id=block_id,
+                entity_type=span.entity_type.value,
+                start=span.start,
+                end=span.end,
+            )
             continue
         seen.add(identity)
         selected.append(span)
@@ -166,6 +188,7 @@ def _fragment_blocks(
                         text=fragment_text,
                         kind=block.kind,
                         location=block.location,
+                        context=dict(block.context),
                     ),
                     block.block_id,
                     start,
@@ -192,8 +215,19 @@ def _llm_batches(
     current_chars = 0
     current_tokens = 0
     for fragment in fragments:
-        block_chars = len(fragment.block.text)
-        block_tokens = token_estimator(fragment.block.text) if token_estimator else 0
+        block_chars = (
+            len(fragment.block.text)
+            + len(json.dumps(fragment.block.context, ensure_ascii=False))
+            + 100
+        )
+        block_tokens = (
+            token_estimator(
+                fragment.block.text + json.dumps(fragment.block.context, ensure_ascii=False)
+            )
+            + 100
+            if token_estimator
+            else 0
+        )
         if current and (
             current_chars + block_chars > max_chars
             or len(current) >= max_blocks
@@ -228,6 +262,7 @@ def _bisect_fragment(fragment: _LLMFragment) -> tuple[_LLMFragment, _LLMFragment
             text=text[:left_end],
             kind=fragment.block.kind,
             location=fragment.block.location,
+            context=dict(fragment.block.context),
         ),
         fragment.original_block_id,
         fragment.offset,
@@ -238,6 +273,7 @@ def _bisect_fragment(fragment: _LLMFragment) -> tuple[_LLMFragment, _LLMFragment
             text=text[right_start:],
             kind=fragment.block.kind,
             location=fragment.block.location,
+            context=dict(fragment.block.context),
         ),
         fragment.original_block_id,
         fragment.offset + right_start,
@@ -264,13 +300,15 @@ async def _find_llm_entities_adaptively(
 ) -> dict[str, list[EntitySpan]]:
     pending: list[tuple[list[_LLMFragment], int]] = [
         (batch, 0)
-        for batch in reversed(_llm_batches(
-            fragments,
-            llm_client.batch_max_chars,
-            llm_client.batch_max_blocks,
-            llm_client.batch_input_token_limit,
-            llm_client.estimate_input_tokens,
-        ))
+        for batch in reversed(
+            _llm_batches(
+                fragments,
+                llm_client.batch_max_chars,
+                llm_client.batch_max_blocks,
+                llm_client.batch_input_token_limit,
+                llm_client.estimate_input_tokens,
+            )
+        )
     ]
     result: defaultdict[str, list[EntitySpan]] = defaultdict(list)
     seen: set[tuple[str, EntityType, int, int]] = set()
@@ -283,6 +321,12 @@ async def _find_llm_entities_adaptively(
             raise LLMRequestBudgetError("LLM request budget exceeded")
         request_count += 1
         try:
+            await progress("detect", detail=f"Ожидание модели: запрос {request_count}")
+            record(
+                "request",
+                blocks=[f.original_block_id for f in batch],
+                characters=sum(len(f.block.text) for f in batch),
+            )
             spans_by_fragment = await llm_client.find_entities_for_analysis(
                 [fragment.block for fragment in batch],
                 mask_types,
@@ -290,16 +334,14 @@ async def _find_llm_entities_adaptively(
             )
         except (LLMContextLimitError, LLMResponseError) as exc:
             if isinstance(exc, LLMResponseError) and exc.category not in {
-                "invalid_response", "response_truncated"
+                "invalid_response",
+                "response_truncated",
             }:
                 raise
-            split = (
-                _split_failed_batch(batch)
-                if depth < LLM_MAX_ADAPTIVE_DEPTH
-                else None
-            )
+            split = _split_failed_batch(batch) if depth < LLM_MAX_ADAPTIVE_DEPTH else None
             if split is None:
                 raise
+            await progress("detect", detail="Повтор запроса с меньшими фрагментами")
             left, right = split
             pending.append((right, depth + 1))
             pending.append((left, depth + 1))
@@ -336,6 +378,8 @@ async def detect_all(
 ) -> dict[str, list[Match]]:
     """Найти сущности во всех блоках и подготовить команды замены."""
 
+    enrich_context(blocks)
+    await progress("detect", detail="Локальные правила")
     mask_types = tuple(dict.fromkeys(requested_types))
     requested = set(mask_types)
     analysis = set(requested)
@@ -352,6 +396,24 @@ async def detect_all(
     fallback_by_index: list[list[EntitySpan]] = []
     for block in blocks:
         rule_spans = detect_rule_based(block.text, rule_types)
+        if EntityType.AMOUNT in requested:
+            money_spans = list(block.context.get("money_spans", []))
+            if monetary_column(block) and re.fullmatch(r"\s*\d[\d\s.,]*", block.text):
+                money_spans.append(
+                    [len(block.text) - len(block.text.lstrip()), len(block.text.rstrip())]
+                )
+            for start, end in money_spans:
+                rule_spans.append(
+                    EntitySpan(
+                        EntityType.AMOUNT,
+                        block.text[start:end],
+                        start,
+                        end,
+                        source="rule",
+                        confidence=1.0,
+                    )
+                )
+        record("rule_candidates", block_id=block.block_id, count=len(rule_spans))
         fallback_by_index.append(
             [
                 span
@@ -393,15 +455,92 @@ async def detect_all(
                     if _is_valid_span(span, block.text, allowed_llm_types)
                 )
 
-    # Explicitly labelled heuristics are fallbacks: any overlapping LLM span keeps
-    # its richer role metadata and confidence.
+    # Trim signature separators and split explicitly bracketed organization aliases.
+    # These changes use confirmed exact spans, never fuzzy replacement coordinates.
     for candidates, fallback_spans in zip(candidates_by_index, fallback_by_index):
+        for candidate in list(candidates):
+            span = candidate.span
+            contained = [
+                f
+                for f in fallback_spans
+                if f.entity_type == span.entity_type and span.start <= f.start and f.end <= span.end
+            ]
+            if not contained:
+                continue
+            residual = span.text
+            for part in sorted(contained, key=lambda f: f.start, reverse=True):
+                residual = residual[: part.start - span.start] + residual[part.end - span.start :]
+            separable = span.entity_type is EntityType.PERSON_NAME and not residual.strip(
+                " /_\t\r\n"
+            )
+            separable |= (
+                span.entity_type is EntityType.ORGANIZATION
+                and len(contained) > 1
+                and not residual.strip(" ()\t\r\n")
+            )
+            if separable and any(f.start != span.start or f.end != span.end for f in contained):
+                candidates.remove(candidate)
+                record(
+                    "candidate_refined",
+                    reason="confirmed_boundaries",
+                    entity_type=span.entity_type.value,
+                )
         for span in fallback_spans:
-            if not any(_overlaps(span, candidate.span) for candidate in candidates):
+            if not any(
+                _overlaps(span, candidate.span)
+                and not (
+                    span.entity_type == candidate.span.entity_type
+                    and span.start <= candidate.span.start
+                    and span.end >= candidate.span.end
+                    and (span.start < candidate.span.start or span.end > candidate.span.end)
+                )
+                for candidate in candidates
+            ):
+                candidates[:] = [
+                    c
+                    for c in candidates
+                    if not (
+                        c.span.entity_type == span.entity_type
+                        and span.start <= c.span.start
+                        and span.end >= c.span.end
+                        and (span.start < c.span.start or span.end > c.span.end)
+                    )
+                ]
                 candidates.append(_Candidate(span=span, is_rule_based=False))
 
+    for block, candidates in zip(blocks, candidates_by_index):
+        # A PDF block may contain text from several table columns. A match must
+        # not assemble a phone or identifier using values in independent cells.
+        for candidate in list(candidates):
+            cells = {
+                (c["table"], c["row"], c["column"])
+                for c in block.context.get("cell_spans", [])
+                if c["start"] < candidate.span.end and candidate.span.start < c["end"]
+            }
+            if len(cells) > 1:
+                candidates.remove(candidate)
+                record(
+                    "candidate_rejected",
+                    reason="independent_cells",
+                    block_id=block.block_id,
+                    entity_type=candidate.span.entity_type.value,
+                )
+        candidates[:] = [
+            c
+            for c in candidates
+            if not (
+                c.span.entity_type is EntityType.PERSON_NAME
+                and re.fullmatch(
+                    r"(?:генеральный\s+)?(?:директор|руководитель|главный\s+бухгалтер)",
+                    c.span.text.strip(),
+                    re.IGNORECASE,
+                )
+            )
+        ]
+    record("candidates_before_resolution", count=sum(map(len, candidates_by_index)))
     resolved_by_index = [
-        _resolve_overlaps(candidates) for candidates in candidates_by_index
+        _resolve_overlaps(candidates, block.block_id)
+        for block, candidates in zip(blocks, candidates_by_index)
     ]
 
     # Complete confirmed values across the whole document (including other batches).
@@ -410,7 +549,10 @@ async def detect_all(
     seeds = {}
     for spans in resolved_by_index:
         for span in spans:
-            if span.entity_type in LLM_BASED_TYPES and len(span.text.strip()) >= 3:
+            if (
+                span.entity_type in LLM_BASED_TYPES - {EntityType.AMOUNT}
+                and len(span.text.strip()) >= 3
+            ):
                 seeds.setdefault((span.entity_type, " ".join(span.text.split())), span)
     for (entity_type, value), seed in seeds.items():
         pattern = re.compile(
@@ -422,16 +564,20 @@ async def detect_all(
             for found in pattern.finditer(block.text):
                 if any(found.start() < span.end and span.start < found.end() for span in spans):
                     continue
-                spans.append(EntitySpan(
-                    entity_type=entity_type, text=found.group(),
-                    start=found.start(), end=found.end(), source="document_repeat",
-                    confidence=seed.confidence, party_role=PartyRole.UNKNOWN,
-                ))
+                spans.append(
+                    EntitySpan(
+                        entity_type=entity_type,
+                        text=found.group(),
+                        start=found.start(),
+                        end=found.end(),
+                        source="document_repeat",
+                        confidence=seed.confidence,
+                        party_role=PartyRole.UNKNOWN,
+                    )
+                )
             spans.sort(key=lambda span: (span.start, span.end))
 
-    spans_by_block = {
-        block.block_id: spans for block, spans in zip(blocks, resolved_by_index)
-    }
+    spans_by_block = {block.block_id: spans for block, spans in zip(blocks, resolved_by_index)}
     registry = build_document_registry(blocks, spans_by_block)
     organization_records = {item.entity_id: item for item in registry.organizations}
 
@@ -483,6 +629,20 @@ async def detect_all(
                             for relation_evidence in relation.evidence
                         )
                     ),
+                    review_reason=(
+                        "В предполагаемый адрес попала дата; проверьте необходимость маскирования."
+                        if span.entity_type is EntityType.ADDRESS
+                        and re.search(r"\b\d{4}\s*г\.?", span.text)
+                        else "Детектор не подтвердил фрагмент однозначно; проверьте необходимость маскирования."
+                        if span.confidence < 0.6
+                        and not any(
+                            fallback.entity_type == span.entity_type
+                            and fallback.start == span.start
+                            and fallback.end == span.end
+                            for fallback in detect_rule_based(block.text, analysis_types)
+                        )
+                        else None
+                    ),
                     conflict=(
                         organization_records[entity_id].conflict
                         if entity_id in organization_records
@@ -490,6 +650,14 @@ async def detect_all(
                     ),
                 )
             )
+        record(
+            "selected_candidates",
+            block_id=block.block_id,
+            candidates=[
+                {"type": m.entity_type.value, "start": m.start, "end": m.end, "source": m.source}
+                for m in block_matches
+            ],
+        )
         result[block.block_id] = block_matches
 
     return result

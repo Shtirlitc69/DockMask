@@ -28,7 +28,10 @@ export interface ClarificationQuestion {
   question: string
 
   related_entity_type: EntityType | null
-  options: Array<"supplier" | "buyer" | "unknown">
+  options: Array<"supplier" | "buyer" | "unknown" | "mask" | "keep">
+  kind?: "party_role" | "mask_decision"
+  reason?: string | null
+  contexts?: Array<{ text: string; location: string; highlight_start: number; highlight_end: number }>
   context_text?: string | null
   context_location?: string | null
   highlight_start?: number | null
@@ -41,6 +44,7 @@ export interface JobStatusResponse {
   status: JobStatus
 
   progress: number
+  stages?: Array<{id: string; status: "pending" | "active" | "waiting" | "done" | "error" | "cancelled"; detail: string; started_at: string | null; finished_at: string | null}>
 
   questions: ClarificationQuestion[]
 
@@ -52,7 +56,7 @@ export interface JobStatusResponse {
 export interface Answer {
   question_id: string
 
-  answer: "supplier" | "buyer" | "unknown"
+  answer: "supplier" | "buyer" | "unknown" | "mask" | "keep"
 }
 
 export interface AnswerBatchResponse {

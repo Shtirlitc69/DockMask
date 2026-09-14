@@ -20,13 +20,15 @@ class QuestionResponse(BaseModel):
     highlight_start: int | None = Field(default=None, ge=0)
     highlight_end: int | None = Field(default=None, ge=1)
     contexts: list[dict[str, object]] = Field(default_factory=list)
+    kind: Literal["party_role", "mask_decision"] = "party_role"
+    reason: str | None = None
 
 
 class JobAnswer(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     question_id: str
-    answer: Literal["supplier", "buyer", "unknown"]
+    answer: Literal["supplier", "buyer", "unknown", "mask", "keep"]
 
 
 class AnswerBatchRequest(BaseModel):
@@ -59,6 +61,7 @@ class JobStatusResponse(BaseModel):
     status: JobStatus
     progress: int = Field(default=0, ge=0, le=100)
     questions: list[QuestionResponse] = Field(default_factory=list)
+    stages: list[dict[str, object]] = Field(default_factory=list)
     total_replacements: int = Field(default=0, ge=0)
     error: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]*$", max_length=100)
 

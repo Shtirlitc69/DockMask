@@ -57,6 +57,8 @@ class Database:
             row[1]
             for row in await (await connection.execute("PRAGMA table_info(jobs)")).fetchall()
         }
+        if "stages" not in columns:
+            await connection.execute("ALTER TABLE jobs ADD COLUMN stages TEXT NOT NULL DEFAULT '[]'")
         if "pending_matches" not in columns:
             await connection.execute(
                 "ALTER TABLE jobs ADD COLUMN pending_matches TEXT NOT NULL DEFAULT '[]'"

@@ -138,24 +138,32 @@ async def test_bundled_tesseract_ocr_redacts_scanned_pdf(tmp_path: Path) -> None
     output.close()
 
 
+class UncertainClient(CountingMockClient):
+    async def find_entities(self, text, types):
+        from core.models import EntitySpan
+        self.entity_calls += 1
+        start = text.find("Иван Петров")
+        return [EntitySpan(EntityType.PERSON_NAME, "Иван Петров", start, start+11, confidence=0.4)] if start >= 0 else []
+
+
 @pytest.mark.asyncio
 async def test_clarification_resumes_without_second_llm_call(tmp_path: Path) -> None:
     source = tmp_path / "source.docx"
     document = Document()
-    document.add_paragraph("ООО Тест")
+    document.add_paragraph("Иван Петров")
     document.save(source)
-    client = CountingMockClient()
+    client = UncertainClient()
 
-    first = await run_pipeline(source, tmp_path / "result", [EntityType.ORGANIZATION], client)
+    first = await run_pipeline(source, tmp_path / "result", [EntityType.PERSON_NAME], client)
     assert first.status is JobStatus.NEEDS_CLARIFICATION
     calls = (client.entity_calls, client.party_calls)
     question = first.open_questions[0]
     second = await run_pipeline(
         source,
         tmp_path / "result",
-        [EntityType.ORGANIZATION],
+        [EntityType.PERSON_NAME],
         client,
-        answers={question.question_id: "unknown"},
+        answers={question.question_id: "mask"},
         prepared_matches=first.matches,
     )
 
@@ -169,37 +177,37 @@ async def test_clarification_contains_context_and_groups_repeated_entity(
 ) -> None:
     source = tmp_path / "source.docx"
     document = Document()
-    document.add_paragraph("Реквизиты: ООО Тест")
-    document.add_paragraph("Подпись: ООО Тест")
+    document.add_paragraph("Реквизиты: Иван Петров")
+    document.add_paragraph("Подпись: Иван Петров")
     document.save(source)
 
     first = await run_pipeline(
         source,
         tmp_path / "result",
-        [EntityType.ORGANIZATION],
-        MockLLMClient(),
+        [EntityType.PERSON_NAME],
+        UncertainClient(),
     )
 
     assert first.status is JobStatus.NEEDS_CLARIFICATION
     assert len(first.open_questions) == 1
     question = first.open_questions[0]
-    assert question.context_text == "Реквизиты: ООО Тест"
+    assert question.context_text == "Реквизиты: Иван Петров"
     assert question.context_location == "Абзац 1"
     assert question.highlight_start is not None
     assert question.highlight_end is not None
     assert (
         question.context_text[question.highlight_start : question.highlight_end]
-        == "ООО Тест"
+        == "Иван Петров"
     )
 
     second = await run_pipeline(
         source,
         tmp_path / "result",
-        [EntityType.ORGANIZATION],
-        MockLLMClient(),
-        answers={question.question_id: "buyer"},
+        [EntityType.PERSON_NAME],
+        UncertainClient(),
+        answers={question.question_id: "mask"},
         prepared_matches=first.matches,
     )
 
     assert second.status is JobStatus.DONE
-    assert {match.party_role.value for match in second.matches} == {"buyer"}
+    assert len(second.matches) == 2

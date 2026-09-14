@@ -9,6 +9,7 @@ import type {
   ProviderId,
   PreviewResponse,
 } from "./api/dto"
+import { processingStepsForJob } from "./processing"
 import { DATA_TYPE_OPTIONS, PROCESSING_STEPS } from "./options"
 import { useDocumentPolling } from "./hooks/useDocumentPolling"
 import type {
@@ -41,6 +42,7 @@ function fmtBytes(b: number) {
 }
 
 const PROVIDER_ERROR_LABELS: Record<string, string> = {
+  redaction_incomplete: "не удалось применить все маски; файл не выдан",
   gigachat_credentials_missing: "не указан ключ авторизации GigaChat",
   gigachat_authentication_failed: "GigaChat отклонил ключ авторизации",
   gigachat_scope_mismatch: "ключ не соответствует выбранному типу доступа",
@@ -975,6 +977,7 @@ export function ClarifyingModal({
         <div className="p-6 space-y-5 max-h-[55vh] overflow-y-auto">
           {questions.map((q, i) => (
             <div key={q.id} className="space-y-2.5">
+              {q.contexts && q.contexts.length > 1 && <details className="text-xs"><summary>Другие вхождения ({q.contexts.length - 1})</summary>{q.contexts.slice(1).map((c, j) => <div key={j} className="my-2 whitespace-pre-wrap"><div>{c.location}</div>{c.text.slice(0, c.highlight_start)}<mark>{c.text.slice(c.highlight_start, c.highlight_end)}</mark>{c.text.slice(c.highlight_end)}</div>)}</details>}
               <div className="flex items-start gap-2.5">
                 <span
                   className="w-5 h-5 rounded-full flex items-center justify-center text-xs font-bold shrink-0 mt-0.5"
@@ -992,6 +995,7 @@ export function ClarifyingModal({
                   >
                     {q.question}
                   </div>
+                  {q.reason && <p className="text-xs mt-1">{q.reason}</p>}
                   {q.contextLocation && (
                     <div
                       className="mt-1 text-[11px]"
@@ -1058,7 +1062,7 @@ export function ClarifyingModal({
                       className="text-xs"
                       style={{ color: "var(--foreground)" }}
                     >
-                      {partyRoleLabel(opt)}
+                      {opt === "mask" ? "Скрыть" : opt === "keep" ? "Оставить" : partyRoleLabel(opt)}
                     </span>
                   </label>
                 ))}
@@ -1585,6 +1589,7 @@ function ProcessingView({
                       }}
                     />
                   )}
+                  {step.status === "error" && <span role="img" aria-label="Остановлено">✕</span>}
                   {isPending && (
                     <div
                       className="w-2 h-2 rounded-full"
@@ -1960,10 +1965,19 @@ function ResultsView({
 
 // ---------------------------------------------------------------------------
 
+function savedTask(): {id: string; file: UploadedFile | null; answers: Record<string, string>} | null {
+  try {
+    const value = JSON.parse(localStorage.getItem("dockmask.activeTask") || "null")
+    return value && typeof value.id === "string" ? value : null
+  } catch { return null }
+}
+
 export default function App() {
+  const [restored] = useState(savedTask)
+
   const [theme, setTheme] = useState<Theme>("dark")
-  const [step, setStep] = useState<AppStep>("upload")
-  const [file, setFile] = useState<UploadedFile | null>(null)
+  const [step, setStep] = useState<AppStep>(restored ? "processing" : "upload")
+  const [file, setFile] = useState<UploadedFile | null>(restored?.file ?? null)
   const [labelStyle, setLabelStyle] = useState<LabelStyle>("full")
   const [nativeFile, setNativeFile] = useState<File | null>(null)
   const [dataTypes, setDataTypes] =
@@ -1976,7 +1990,7 @@ export default function App() {
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [previewTruncated, setPreviewTruncated] = useState(false)
   const [questions, setQuestions] = useState<ClarifyingQuestion[]>([])
-  const [jobId, setJobId] = useState<string | null>(null)
+  const [jobId, setJobId] = useState<string | null>(restored?.id ?? null)
   const [pollRevision, setPollRevision] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [online, setOnline] = useState(true)
@@ -1993,6 +2007,15 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const operationRef = useRef(0)
   const polling = useDocumentPolling(jobId, pollRevision)
+
+  useEffect(() => {
+    try {
+      if (jobId) localStorage.setItem("dockmask.activeTask", JSON.stringify({
+        id: jobId, file, answers: Object.fromEntries(questions.filter(q => q.answer).map(q => [q.id, q.answer])),
+      }))
+      else localStorage.removeItem("dockmask.activeTask")
+    } catch { /* Storage restrictions must not block processing. */ }
+  }, [jobId, file, questions])
 
   // Apply theme
 
@@ -2015,24 +2038,13 @@ export default function App() {
     if (polling.error) setError(polling.error)
     const job = polling.job
     if (!job || job.job_id !== jobId) return
-    const completed = Math.min(
-      PROCESSING_STEPS.length,
-      Math.floor(job.progress / (100 / PROCESSING_STEPS.length)),
-    )
-    setProcessingSteps(
-      PROCESSING_STEPS.map((item, index) => ({
-        ...item,
-        status:
-          index < completed
-            ? "done"
-            : index === completed && job.status === "processing"
-              ? "active"
-              : "pending",
-      })),
-    )
+    setProcessingSteps(processingStepsForJob(job))
     if (job.status === "needs_clarification") {
-      setQuestions(
+      setQuestions((previous) =>
         job.questions.map((question) => ({
+          answer: previous.find((q) => q.id === question.question_id)?.answer ?? (restored?.id === jobId ? restored.answers?.[question.question_id] : undefined),
+          reason: question.reason ?? undefined,
+          contexts: question.contexts,
           id: question.question_id,
           question: question.question,
           context:
@@ -2209,7 +2221,7 @@ export default function App() {
         jobId,
         questions.map((question) => ({
           question_id: question.id,
-          answer: question.answer as "supplier" | "buyer" | "unknown",
+          answer: question.answer as "supplier" | "buyer" | "unknown" | "mask" | "keep",
         })),
       )
       if (operation !== operationRef.current) return

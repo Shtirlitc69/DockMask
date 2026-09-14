@@ -76,7 +76,7 @@ class GigaChatClientTests(unittest.IsolatedAsyncioTestCase):
         client = self.make_client(lambda request: token_response(request))
         self.assertIsInstance(client, BaseLLMClient)
 
-    async def test_batches_many_blocks_into_one_sequential_chat_request(self) -> None:
+    async def test_batches_many_blocks_with_structural_context(self) -> None:
         oauth_calls = 0
         chat_calls = 0
 
@@ -111,7 +111,7 @@ class GigaChatClientTests(unittest.IsolatedAsyncioTestCase):
         result = await detect_all(blocks, [EntityType.ORGANIZATION], client)
 
         self.assertEqual(oauth_calls, 1)
-        self.assertEqual(chat_calls, 1)
+        self.assertEqual(chat_calls, 2)  # Context metadata counts towards the batch budget.
         self.assertEqual(result["p:0"][0].party_role, PartyRole.SUPPLIER)
 
     async def test_lists_only_chat_models_with_cached_oauth_token(self) -> None:

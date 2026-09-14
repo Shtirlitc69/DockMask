@@ -202,7 +202,7 @@ class PartyIdentifierTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(match.party_role, PartyRole.UNKNOWN)
                 self.assertEqual(len(client.calls), 1)
 
-    async def test_non_party_and_preclassified_matches_are_untouched(self) -> None:
+    async def test_explicit_role_overrides_model_but_non_party_is_untouched(self) -> None:
         block = self.block(0, "Поставщик: ООО Альфа, ИНН 7707083893")
         organization = self.match(
             block,
@@ -216,7 +216,7 @@ class PartyIdentifierTests(unittest.IsolatedAsyncioTestCase):
             [block], {block.block_id: [organization, inn]}, client
         )
 
-        self.assertEqual(organization.party_role, PartyRole.BUYER)
+        self.assertEqual(organization.party_role, PartyRole.SUPPLIER)
         self.assertEqual(inn.party_role, PartyRole.UNKNOWN)
         self.assertEqual(client.calls, [])
 

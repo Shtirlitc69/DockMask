@@ -159,6 +159,7 @@ def _serialize_matches(matches: list[Match]) -> list[dict[str, object]]:
                 for evidence in item.evidence
             ],
             "conflict": item.conflict,
+            "review_reason": item.review_reason,
             "location": {
                 "paragraph_index": item.location.paragraph_index,
                 "table_index": item.location.table_index,
@@ -231,6 +232,7 @@ def _deserialize_matches(values: list[dict[str, object]]) -> list[Match]:
                     if isinstance(item, dict)
                 ),
                 conflict=bool(value.get("conflict", False)),
+                review_reason=value.get("review_reason"),
             )
         )
     return matches
@@ -546,6 +548,7 @@ class RuntimeJobService:
             job_id=record.job_id,
             status=record.status,
             progress=record.progress,
+            stages=record.stages,
             questions=[QuestionResponse.model_validate(item) for item in record.questions],
             total_replacements=record.total_replacements,
             error=record.error,
@@ -586,13 +589,18 @@ class RuntimeJobService:
         provided = {item.question_id: item.answer for item in payload.answers}
         if set(provided) != expected:
             raise ValueError("answers must cover all questions")
+        if len(provided) != len(payload.answers):
+            raise ValueError("duplicate question IDs")
+        for question in record.questions:
+            if provided[str(question["question_id"])] not in question.get("options", []):
+                raise ValueError("invalid answer option")
         await self._repository.save_answers(job_id, provided)
         await self._queue.put(job_id)
         return AnswerBatchResponse(accepted=True, job_id=job_id, answers_count=len(provided))
 
     async def get_artifact(self, job_id: str, kind: str) -> DownloadArtifact:
         record = await self._require(job_id)
-        if record.status is not JobStatus.DONE:
+        if record.status is not JobStatus.DONE and kind != "diagnostics":
             raise JobStateError
         stem = Path(record.source_filename).stem
         suffix = Path(record.source_filename).suffix.lower()
@@ -616,6 +624,7 @@ class RuntimeJobService:
             except (OSError, ValueError, TypeError, KeyError):
                 raise JobStateError from None
         mapping = {
+            "diagnostics": (Path(record.input_path).with_suffix(".diagnostics.json"), "application/json", f"{stem}_диагностика.json"),
             "document": (
                 record.output_path,
                 document_media_types.get(suffix, "application/octet-stream"),
@@ -786,6 +795,7 @@ async def create_runtime(
                             use_ocr=True,
                             ocr_provider=ocr_provider,
                             cancel_check=check_cancelled,
+                            progress_callback=lambda stage, status, detail, current_job=job_id: repository.update_stage(current_job, stage, status, detail),
                         ),
                         name=f"dockmask-pipeline-{job_id}",
                     )
@@ -832,6 +842,8 @@ async def create_runtime(
                             "highlight_start": item.highlight_start,
                             "highlight_end": item.highlight_end,
                             "contexts": list(item.contexts),
+                            "kind": item.kind,
+                            "reason": item.reason,
                         }
                         for item in result.open_questions
                     ]

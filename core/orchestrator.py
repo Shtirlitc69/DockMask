@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import shutil
 import tempfile
@@ -24,15 +25,16 @@ from core.models import (
     Match,
     PartyRole,
     PipelineResult,
-    TextBlock,
 )
 from core.redaction.docx_redactor import redact_docx
 from core.redaction.options import LabelStyle
 from core.redaction.pdf_redactor import redact_pdf
 from core.redaction.xlsx_redactor import redact_xlsx
 from core.report.report_generator import ReportGenerator, format_location, generate_report
+from core.telemetry import ProgressCallback, Trace, current_trace, progress, record
 from llm.base import BaseLLMClient
 from llm.http_utils import LLMContextLimitError, LLMHTTPError, LLMProviderError
+from llm.prompts import PROMPT_VERSION
 from llm.request_budget import LLMRequestBudgetError, request_budget
 from llm.structured import LLMResponseError
 
@@ -49,6 +51,7 @@ async def _file_operation(function: Callable[P, T], *args: P.args, **kwargs: P.k
     except asyncio.CancelledError:
         await asyncio.gather(task, return_exceptions=True)
         raise
+
 
 _EXTRACTORS = {
     DocumentFormat.DOCX: extract_docx,
@@ -96,6 +99,9 @@ def _apply_answers(
     for match in _flatten_matches(matches_by_block):
         question_id = _question_id(match)
         value = answers.get(question_id)
+        mask_answer = answers.get("mask:" + question_id)
+        if mask_answer in {"mask", "keep"}:
+            accepted.add("mask:" + question_id)
         if value not in {item.value for item in PartyRole}:
             continue
         match.party_role = PartyRole(value)
@@ -103,84 +109,42 @@ def _apply_answers(
     return accepted
 
 
-def _role_questions(
-    matches_by_block: Mapping[str, Iterable[Match]],
-    answered: set[str],
-    blocks: Iterable[TextBlock],
-) -> list[ClarifyingQuestion]:
-    questions: list[ClarifyingQuestion] = []
-    blocks_by_id = {block.block_id: block for block in blocks}
-    added: set[str] = set()
-    grouped_contexts: dict[str, list[dict[str, object]]] = {}
-    for candidate in _flatten_matches(matches_by_block):
-        candidate_id = _question_id(candidate)
-        block = blocks_by_id.get(candidate.block_id)
-        if block is None:
+def _mask_questions(matches_by_block, answered, blocks):
+    questions = []
+    by_id = {block.block_id: block for block in blocks}
+    grouped = {}
+    for match in _flatten_matches(matches_by_block):
+        if not match.review_reason:
             continue
-        line_start = block.text.rfind("\n", 0, candidate.start) + 1
-        line_end = block.text.find("\n", candidate.end)
-        if line_end < 0:
-            line_end = len(block.text)
-        raw_line = block.text[line_start:line_end]
-        leading_spaces = len(raw_line) - len(raw_line.lstrip())
-        text = raw_line.strip() or block.text
-        start = candidate.start - line_start - leading_spaces
-        end = candidate.end - line_start - leading_spaces
-        if not 0 <= start < end <= len(text):
-            text, start, end = block.text, candidate.start, candidate.end
-        contexts = grouped_contexts.setdefault(candidate_id, [])
-        if len(contexts) < 3:
+        grouped.setdefault("mask:" + _question_id(match), []).append(match)
+    for question_id, matches in grouped.items():
+        if question_id in answered:
+            continue
+        contexts = []
+        for match in matches[:3]:
+            block = by_id[match.block_id]
             contexts.append(
                 {
-                    "text": text,
-                    "location": format_location(candidate.location),
-                    "highlight_start": start,
-                    "highlight_end": end,
+                    "text": block.text,
+                    "location": format_location(match.location),
+                    "highlight_start": match.start,
+                    "highlight_end": match.end,
                 }
             )
-    for match in _flatten_matches(matches_by_block):
-        if match.entity_type not in {EntityType.ORGANIZATION, EntityType.PERSON_NAME}:
-            continue
-        question_id = _question_id(match)
-        if (
-            match.party_role is not PartyRole.UNKNOWN
-            or question_id in answered
-            or question_id in added
-        ):
-            continue
-        added.add(question_id)
-        block = blocks_by_id.get(match.block_id)
-        context_text: str | None = None
-        highlight_start: int | None = None
-        highlight_end: int | None = None
-        if block is not None:
-            line_start = block.text.rfind("\n", 0, match.start) + 1
-            line_end = block.text.find("\n", match.end)
-            if line_end < 0:
-                line_end = len(block.text)
-            raw_line = block.text[line_start:line_end]
-            leading_spaces = len(raw_line) - len(raw_line.lstrip())
-            context_text = raw_line.strip()
-            highlight_start = match.start - line_start - leading_spaces
-            highlight_end = match.end - line_start - leading_spaces
-            if not (
-                context_text
-                and 0 <= highlight_start < highlight_end <= len(context_text)
-            ):
-                context_text = block.text
-                highlight_start = match.start
-                highlight_end = match.end
+        first = contexts[0]
         questions.append(
             ClarifyingQuestion(
-                question=f"Определите роль стороны «{match.text}» ({match.replacement}).",
-                related_entity_type=match.entity_type,
+                question="Скрыть выделенный фрагмент?",
                 question_id=question_id,
-                options=tuple(item.value for item in PartyRole),
-                context_text=context_text,
-                context_location=format_location(match.location),
-                highlight_start=highlight_start,
-                highlight_end=highlight_end,
-                contexts=tuple(grouped_contexts.get(question_id, ())),
+                related_entity_type=matches[0].entity_type,
+                options=("mask", "keep"),
+                context_text=first["text"],
+                context_location=first["location"],
+                highlight_start=first["highlight_start"],
+                highlight_end=first["highlight_end"],
+                contexts=tuple(contexts),
+                kind="mask_decision",
+                reason=matches[0].review_reason,
             )
         )
     return questions
@@ -198,6 +162,7 @@ async def run_pipeline(
     use_ocr: bool = False,
     ocr_provider: OcrProvider | None = None,
     cancel_check: Callable[[], None] | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> PipelineResult:
     """Process a DOCX, XLSX or text PDF and atomically publish its outputs."""
 
@@ -217,8 +182,21 @@ async def run_pipeline(
     output_root = Path(output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=output_root))
+    trace = Trace(callback=progress_callback)
+    trace_token = current_trace.set(trace)
+    record(
+        "configuration",
+        app_version="0.1.0",
+        prompt_version=PROMPT_VERSION,
+        provider=llm_client.provider_name,
+        model=getattr(llm_client, "_model", "local"),
+        entity_types=[t.value for t in normalized_types],
+        confidence_semantics="adapter_constant_not_calibrated",
+    )
     try:
         _check_cancelled(cancel_check)
+        if prepared_matches is None:
+            await progress("extract")
         extracted = await _file_operation(_EXTRACTORS[document_format], source)
         _check_cancelled(cancel_check)
         if extracted.is_scanned:
@@ -238,7 +216,12 @@ async def run_pipeline(
                     return PipelineResult(status=JobStatus.FAILED, error_message="ocr_no_text")
                 extracted.blocks.extend(page_blocks)
 
+        record(
+            "extracted",
+            blocks=[{"id": b.block_id, "characters": len(b.text)} for b in extracted.blocks],
+        )
         if prepared_matches is None:
+            await progress("extract", "done")
             with request_budget():
                 matches_by_block = await detect_all(
                     extracted.blocks,
@@ -254,15 +237,25 @@ async def run_pipeline(
             matches_by_block: dict[str, list[Match]] = {}
             for match in prepared_matches:
                 matches_by_block.setdefault(match.block_id, []).append(match)
+        if prepared_matches is None:
+            await progress("detect", "done")
+        await progress("clarify", detail="Проверка кандидатов")
         answered = _apply_answers(matches_by_block, answers or {})
-        questions = _role_questions(matches_by_block, answered, extracted.blocks)
+        questions = _mask_questions(matches_by_block, answered, extracted.blocks)
         if questions:
+            await progress("clarify", "waiting", "Ожидание ответов")
             return PipelineResult(
                 status=JobStatus.NEEDS_CLARIFICATION,
                 matches=_flatten_matches(matches_by_block),
                 open_questions=questions,
             )
 
+        for block_id, matches in matches_by_block.items():
+            matches_by_block[block_id] = [
+                m for m in matches if (answers or {}).get("mask:" + _question_id(m)) != "keep"
+            ]
+        await progress("clarify", "done")
+        await progress("redact")
         staged_document = staging / f"{source.stem}.redacted{source.suffix.lower()}"
         await _file_operation(
             _REDACTORS[document_format],
@@ -272,6 +265,29 @@ async def run_pipeline(
             label_style=label_style,
         )
         _check_cancelled(cancel_check)
+        for m in _flatten_matches(matches_by_block):
+            record(
+                "mask_application",
+                block_id=m.block_id,
+                entity_type=m.entity_type.value,
+                start=m.start,
+                end=m.end,
+                applied=m.applied,
+            )
+        if any(not m.applied for m in _flatten_matches(matches_by_block)):
+            record(
+                "redaction_incomplete",
+                count=sum(not m.applied for m in _flatten_matches(matches_by_block)),
+            )
+            await progress("redact", "error", "Не удалось применить все маски")
+            return PipelineResult(status=JobStatus.FAILED, error_message="redaction_incomplete")
+        await progress("redact", "done")
+        record(
+            "redaction",
+            candidates=sum(map(len, matches_by_block.values())),
+            applied=sum(m.applied for m in _flatten_matches(matches_by_block)),
+        )
+        await progress("report")
         flat_matches = _flatten_matches(matches_by_block)
         staged_json = staging / f"{source.stem}.report.json"
         staged_xlsx = staging / f"{source.stem}.report.xlsx"
@@ -295,6 +311,7 @@ async def run_pipeline(
             _check_cancelled(cancel_check)
             staged_path.replace(final_path)
 
+        await progress("report", "done")
         applied = [match for match in flat_matches if match.applied]
         return PipelineResult(
             status=JobStatus.DONE,
@@ -337,7 +354,8 @@ async def run_pipeline(
     except LLMResponseError as exc:
         LOGGER.error(
             "pipeline_provider_invalid_response provider=%s category=%s",
-            llm_client.provider_name, exc.category,
+            llm_client.provider_name,
+            exc.category,
         )
         return PipelineResult(status=JobStatus.FAILED, error_message=f"provider_{exc.category}")
     except LLMProviderError as exc:
@@ -351,7 +369,22 @@ async def run_pipeline(
         LOGGER.error("pipeline_failed exception_type=%s", type(exc).__name__)
         return PipelineResult(status=JobStatus.FAILED, error_message="pipeline_failed")
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        try:
+            diagnostic = output_root / f"{source.stem}.diagnostics.json"
+            previous = (
+                json.loads(diagnostic.read_text(encoding="utf-8"))
+                if diagnostic.exists()
+                else {"runs": []}
+            )
+            previous["runs"].append({"events": trace.events})
+            diagnostic.write_text(
+                json.dumps(previous, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except (OSError, ValueError, TypeError, KeyError):
+            LOGGER.warning("diagnostics_write_failed")
+        finally:
+            current_trace.reset(trace_token)
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 async def pipeline_run(

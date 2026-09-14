@@ -128,6 +128,7 @@ class TextBlock:
     text: str
     kind: BlockKind
     location: Location
+    context: dict[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.block_id:
@@ -194,6 +195,7 @@ class Match:
     evidence: tuple[EvidenceRecord, ...] = ()
     conflict: bool = False
     applied: bool = False
+    review_reason: str | None = None
 
     def __post_init__(self) -> None:
         if not self.block_id:
@@ -225,6 +227,8 @@ class ClarifyingQuestion:
     highlight_start: int | None = None
     highlight_end: int | None = None
     contexts: tuple[dict[str, object], ...] = ()
+    kind: str = "party_role"
+    reason: str | None = None
 
     def __post_init__(self) -> None:
         if not self.question:

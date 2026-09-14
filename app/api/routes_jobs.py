@@ -313,3 +313,8 @@ async def health(service: HealthServiceDependency) -> HealthResponse:
         return await service.get_health()
     except ServiceUnavailableError as exc:
         _raise_service_error(exc)
+
+
+@router.get("/jobs/{job_id}/diagnostics.json")
+async def get_diagnostics(job_id: str, service: JobServiceDependency) -> FileResponse:
+    return await _artifact_response(job_id, "diagnostics", service)

@@ -103,3 +103,22 @@ describe("model selection", () => {
     expect((modelInput as HTMLInputElement).value).toBe("GigaChat-3-Ultra")
   })
 })
+
+
+describe("mask clarification", () => {
+  it("shows the reason, additional contexts and sends a keep decision", () => {
+    const onAnswer = vi.fn()
+    render(<ClarifyingModal questions={[{
+      id: "mask:1", question: "Скрыть выделенный фрагмент?", context: "Иван Петров",
+      reason: "Спорная находка", options: ["mask", "keep"],
+      contexts: [
+        {text: "Иван Петров", location: "Абзац 1", highlight_start: 0, highlight_end: 11},
+        {text: "Имя: Иван Петров", location: "Абзац 2", highlight_start: 5, highlight_end: 16},
+      ],
+    }]} onAnswer={onAnswer} onConfirm={vi.fn()} onCancel={vi.fn()} cancelling={false} />)
+    expect(screen.getByText("Спорная находка")).toBeTruthy()
+    expect(screen.getByText("Другие вхождения (1)")).toBeTruthy()
+    fireEvent.click(screen.getByText("Оставить"))
+    expect(onAnswer).toHaveBeenCalledWith("mask:1", "keep")
+  })
+})

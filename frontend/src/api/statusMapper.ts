@@ -52,7 +52,7 @@ export function mapBackendStatusToUi(
     case "cancelled":
       return {
         uiState: "idle",
-        progress: 100,
+        progress,
         label: "Обработка отменена",
         isError: false,
       }

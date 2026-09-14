@@ -161,7 +161,7 @@ def test_provider_keys_are_isolated_and_write_only(tmp_path: Path) -> None:
 def test_runtime_cancels_clarification_and_removes_job_files(tmp_path: Path) -> None:
     source = tmp_path / "source.docx"
     document = Document()
-    document.add_paragraph("ООО Тест")
+    document.add_paragraph("Иван Петров")
     document.save(source)
     data_dir = tmp_path / "runtime"
     app = create_app(
@@ -169,11 +169,12 @@ def test_runtime_cancels_clarification_and_removes_job_files(tmp_path: Path) -> 
         secret_store=MemorySecretStore(),
     )
 
-    with TestClient(app) as client, source.open("rb") as stream:
+    from tests.test_orchestrator_formats import UncertainClient
+    with patch("app.runtime.get_llm_client", return_value=UncertainClient()), TestClient(app) as client, source.open("rb") as stream:
         created = client.post(
             "/api/jobs",
             files={"file": (source.name, stream)},
-            data={"entity_types": "organization"},
+            data={"entity_types": "person_name"},
         )
         job_id = created.json()["job_id"]
         for _ in range(100):

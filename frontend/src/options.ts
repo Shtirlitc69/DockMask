@@ -17,8 +17,8 @@ export const PROCESSING_STEPS: ProcessingStepDef[] = [
   },
   {
     id: "clarify",
-    label: "Проверка полноты",
-    detail: "Уточнение неоднозначных ролей",
+    label: "Проверка кандидатов",
+    detail: "Проверка спорных фрагментов",
     status: "pending",
     durationMs: 0,
   },
@@ -104,8 +104,8 @@ export const DATA_TYPE_OPTIONS: DataTypeOption[] = [
   },
   {
     id: "bank_account",
-    label: "Расчётный счёт",
-    description: "Банковские счета",
+    label: "Банковские и лицевые счета",
+    description: "Расчётные, корреспондентские и лицевые счета",
     category: "financial",
     markerPrefix: "РАСЧЁТНЫЙ_СЧЁТ",
     selected: true,

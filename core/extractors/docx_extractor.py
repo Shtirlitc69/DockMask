@@ -5,6 +5,7 @@ from pathlib import Path
 
 from docx import Document
 
+from core.context import enrich_context
 from core.models import (
     BlockKind,
     DocumentFormat,
@@ -65,6 +66,16 @@ class DocxExtractor:
                             )
                         )
 
+        # Keep stable paragraph/table identifiers but restore OOXML document order.
+        body_order = {node: index for index, node in enumerate(document.element.body)}
+        paragraph_order = {i: body_order[p._p] for i, p in enumerate(document.paragraphs)}
+        table_order = {i: body_order[t._tbl] for i, t in enumerate(document.tables)}
+        blocks.sort(key=lambda b: (
+            paragraph_order[b.location.paragraph_index]
+            if b.location.paragraph_index is not None else table_order[b.location.table_index],
+            b.location.row or 0, b.location.column or 0, b.location.cell_paragraph_index or 0,
+        ))
+        enrich_context(blocks)
         return ExtractedDocument(
             format=DocumentFormat.DOCX,
             blocks=blocks,

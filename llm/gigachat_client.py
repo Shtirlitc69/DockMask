@@ -14,6 +14,7 @@ from weakref import WeakKeyDictionary
 import httpx
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from core.telemetry import progress, record
 from llm.http_utils import (
     LLMContextLimitError,
     LLMHTTPError,
@@ -229,6 +230,7 @@ class GigaChatClient(StructuredLLMClient):
         system_prompt: str | None = None,
     ) -> str:
         gate = _generation_gate()
+        await progress("detect", detail="Ожидание очереди запросов модели")
         async with gate.lock:
             delay = gate.ready_at - time.monotonic()
             if delay > 0:
@@ -297,6 +299,8 @@ class GigaChatClient(StructuredLLMClient):
         while True:
             try:
                 consume_request()
+                await progress("detect", detail="Ожидание ответа GigaChat")
+                record("provider_request", model=self._model, estimated_tokens=estimated_tokens, stage=stage)
                 started = time.monotonic()
                 response = await self._http_client.post(
                     self._chat_url,
@@ -315,6 +319,7 @@ class GigaChatClient(StructuredLLMClient):
                     raise GigaChatError(
                         "GigaChat request failed after retryable network errors"
                     ) from exc
+                await progress("detect", detail="Повтор запроса после сетевой ошибки")
                 await retry_delay(transient_attempt)
                 continue
 
@@ -340,6 +345,7 @@ class GigaChatClient(StructuredLLMClient):
             if self._is_retryable_status(response.status_code):
                 transient_attempt += 1
                 if transient_attempt < MAX_ATTEMPTS:
+                    await progress("detect", detail="Ожидание повторного запроса GigaChat")
                     await retry_delay(transient_attempt, response)
                     await asyncio.sleep(max(0.0, _generation_gate().ready_at - time.monotonic()))
                     continue

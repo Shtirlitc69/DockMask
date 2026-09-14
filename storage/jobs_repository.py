@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from core.models import DocumentFormat, EntityType, JobStatus
 from core.redaction.options import LabelStyle
+from core.telemetry import STAGES
 from llm.types import LLMClientConfig, ProviderId
 from storage.db import Database
 
@@ -38,6 +39,7 @@ class JobRecord:
     base_url: str | None
     scope: str | None
     label_style: LabelStyle = LabelStyle.FULL
+    stages: list[dict] = field(default_factory=list)
 
 
 class JobsRepository:
@@ -99,6 +101,7 @@ class JobsRepository:
             json_report_path=row["json_report_path"],
             xlsx_report_path=row["xlsx_report_path"],
             progress=row["progress"],
+            stages=json.loads(row["stages"]),
             questions=json.loads(row["questions"]),
             answers=json.loads(row["answers"]),
             pending_matches=json.loads(row["pending_matches"]),
@@ -124,13 +127,13 @@ class JobsRepository:
         allowed = {
             "status", "progress", "questions", "answers", "output_path",
             "json_report_path", "xlsx_report_path", "total_replacements", "error",
-            "pending_matches",
+            "pending_matches", "stages",
         }
         if not values or not set(values) <= allowed:
             raise ValueError("invalid job update")
         encoded = {
             key: json.dumps(value, ensure_ascii=False)
-            if key in {"questions", "answers", "pending_matches"}
+            if key in {"questions", "answers", "pending_matches", "stages"}
             else value
             for key, value in values.items()
         }
@@ -141,10 +144,40 @@ class JobsRepository:
         await connection.execute(f"UPDATE jobs SET {assignments} WHERE job_id = ?", parameters)
         await connection.commit()
 
+    async def update_stage(self, job_id: str, stage: str, status: str, detail: str = "") -> None:
+        if stage not in STAGES:
+            raise ValueError("invalid stage")
+        record = await self.get_job(job_id)
+        if record is None or record.status not in {JobStatus.PROCESSING, JobStatus.NEEDS_CLARIFICATION}:
+            return
+        stages = record.stages or [{"id": key, "status": "pending", "started_at": None,
+                                   "finished_at": None, "detail": ""} for key in STAGES]
+        item = next(item for item in stages if item["id"] == stage)
+        if item["status"] == "done":
+            return
+        item.update(status=status, detail=detail or item.get("detail", ""))
+        item["started_at"] = item.get("started_at") or _now()
+        if status in {"done", "error", "cancelled"}:
+            item["finished_at"] = _now()
+        progress = 20 * sum(item["status"] == "done" for item in stages)
+        connection = self._database.require_connection()
+        await connection.execute(
+            "UPDATE jobs SET stages = ?, progress = ?, updated_at = ? WHERE job_id = ? AND status IN (?, ?)",
+            (json.dumps(stages), progress, _now(), job_id, JobStatus.PROCESSING.value, JobStatus.NEEDS_CLARIFICATION.value),
+        )
+        await connection.commit()
+
+    async def finish_active_stage(self, job_id: str, status: str) -> None:
+        record = await self.get_job(job_id)
+        if record:
+            for stage in record.stages:
+                if stage["status"] in {"active", "waiting"}:
+                    await self.update_stage(job_id, stage["id"], status)
+
     async def set_processing(self, job_id: str) -> bool:
         connection = self._database.require_connection()
         cursor = await connection.execute(
-            """UPDATE jobs SET status = ?, progress = 5, error = NULL, updated_at = ?
+            """UPDATE jobs SET status = ?, error = NULL, updated_at = ?
                WHERE job_id = ? AND status = ?""",
             (JobStatus.PROCESSING.value, _now(), job_id, JobStatus.QUEUED.value),
         )
@@ -160,7 +193,6 @@ class JobsRepository:
         await self._update(
             job_id,
             status=JobStatus.NEEDS_CLARIFICATION.value,
-            progress=70,
             questions=questions,
             pending_matches=pending_matches,
         )
@@ -169,7 +201,6 @@ class JobsRepository:
         await self._update(
             job_id,
             status=JobStatus.QUEUED.value,
-            progress=0,
             answers=answers,
             questions=[],
         )
@@ -197,18 +228,19 @@ class JobsRepository:
         )
 
     async def set_failed(self, job_id: str, code: str) -> None:
+        await self.finish_active_stage(job_id, "error")
         await self._update(
             job_id,
             status=JobStatus.FAILED.value,
             error=code,
-            progress=100,
             pending_matches=[],
         )
 
     async def set_cancelled(self, job_id: str) -> bool:
+        await self.finish_active_stage(job_id, "cancelled")
         connection = self._database.require_connection()
         cursor = await connection.execute(
-            """UPDATE jobs SET status = ?, progress = 100, questions = '[]',
+            """UPDATE jobs SET status = ?, questions = '[]',
                pending_matches = '[]', error = NULL, updated_at = ?
                WHERE job_id = ? AND status IN (?, ?, ?)""",
             (
@@ -225,13 +257,12 @@ class JobsRepository:
 
     async def recover_interrupted(self) -> int:
         connection = self._database.require_connection()
-        cursor = await connection.execute(
-            """UPDATE jobs SET status = ?, error = ?, progress = 100, updated_at = ?
-               WHERE status = ?""",
-            (JobStatus.FAILED.value, "processing_interrupted", _now(), JobStatus.PROCESSING.value),
-        )
-        await connection.commit()
-        return cursor.rowcount
+        cursor = await connection.execute("SELECT job_id FROM jobs WHERE status = ?", (JobStatus.PROCESSING.value,))
+        jobs = await cursor.fetchall()
+        await cursor.close()
+        for job in jobs:
+            await self.set_failed(job["job_id"], "processing_interrupted")
+        return len(jobs)
 
     async def get_config(self) -> LLMClientConfig:
         cursor = await self._database.require_connection().execute(

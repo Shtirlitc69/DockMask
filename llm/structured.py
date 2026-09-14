@@ -11,6 +11,7 @@ from typing import Literal, TypeVar
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from core.models import EntitySpan, EntityType, PartyRole, TextBlock
+from core.telemetry import progress, record
 from llm.base import BaseLLMClient
 from llm.prompts import (
     BATCH_ENTITY_SYSTEM_PROMPT,
@@ -121,12 +122,15 @@ def to_entity_spans(
         try:
             entity_type = EntityType(entity.type)
         except ValueError:
+            record("candidate_rejected", reason="unknown_type")
             logger.warning("LLM returned an unknown entity type")
             continue
         if entity_type not in requested:
+            record("candidate_rejected", reason="unrequested_type", entity_type=entity_type.value)
             logger.warning("LLM returned an unrequested entity type")
             continue
         if not entity.text:
+            record("candidate_rejected", reason="empty_value", entity_type=entity_type.value)
             logger.warning("LLM returned an empty entity value for type %s", entity_type.value)
             continue
         # Models may replace a PDF line wrap with a space. Locate only whitespace
@@ -141,6 +145,7 @@ def to_entity_spans(
             pattern += r"(?!\w)"
         matches = tuple(re.finditer(pattern, source_text))
         if not matches:
+            record("candidate_rejected", reason="not_in_source", entity_type=entity_type.value)
             logger.warning(
                 "LLM entity value was absent from source text for type %s",
                 entity_type.value,
@@ -234,7 +239,9 @@ class StructuredLLMClient(BaseLLMClient):
             ),
             system_prompt=BATCH_ENTITY_SYSTEM_PROMPT,
         )
+        await progress("detect", detail="Обработка ответа модели")
         payload = parse_model_json(content, BlockEntitiesResponse)
+        record("model_candidates", count=len(payload.entities))
         by_index = {index: block for index, block in indexed}
         seen: set[tuple[int, EntityType, int, int]] = set()
         for entity in payload.entities:
@@ -258,6 +265,7 @@ class StructuredLLMClient(BaseLLMClient):
                 identity = (entity.block_id, span.entity_type, span.start, span.end)
                 if identity not in seen:
                     seen.add(identity)
+                    record("model_candidate_located", block_id=block.block_id, entity_type=span.entity_type.value, start=span.start, end=span.end)
                     result[block.block_id].append(span)
         for spans in result.values():
             spans.sort(key=lambda span: (span.start, span.end, span.entity_type.value))
@@ -281,11 +289,14 @@ class StructuredLLMClient(BaseLLMClient):
                 selected,
                 mask_types=mask_types,
                 auxiliary_types=auxiliary_types,
+                contexts={index: block.context for index, block in indexed},
             ),
             block_entity_response_schema([index for index, _ in indexed], selected),
             system_prompt=BATCH_ENTITY_SYSTEM_PROMPT,
         )
+        await progress("detect", detail="Обработка ответа модели")
         payload = parse_model_json(content, BlockEntitiesResponse)
+        record("model_candidates", count=len(payload.entities))
         by_index = {index: block for index, block in indexed}
         seen: set[tuple[int, EntityType, int, int]] = set()
         for entity in payload.entities:
@@ -295,6 +306,7 @@ class StructuredLLMClient(BaseLLMClient):
             except ValueError:
                 continue
             if block is None or entity_type not in selected or not entity.text:
+                record("candidate_rejected", reason="invalid_block_or_type_or_empty", block_index=entity.block_id)
                 continue
             for span in to_entity_spans(
                 block.text, frozenset(requested),
@@ -304,6 +316,7 @@ class StructuredLLMClient(BaseLLMClient):
                 identity = (entity.block_id, span.entity_type, span.start, span.end)
                 if identity not in seen:
                     seen.add(identity)
+                    record("model_candidate_located", block_id=block.block_id, entity_type=span.entity_type.value, start=span.start, end=span.end)
                     result[block.block_id].append(span)
         for spans in result.values():
             spans.sort(key=lambda span: (span.start, span.end, span.entity_type.value))

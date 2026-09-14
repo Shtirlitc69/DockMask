@@ -74,7 +74,7 @@ class RuleBasedDetectorTests(unittest.TestCase):
         cases = (
             ("7707083893", EntityType.INN),
             ("773601001", EntityType.KPP),
-            ("ОГРН 1027700132194", EntityType.OGRN),
+            ("ОГРН 102770013219", EntityType.OGRN),
             ("+7 (495) 123-45-67", EntityType.PHONE),
             ("пишите на info@localhost", EntityType.EMAIL),
             ("40702810900000000001", EntityType.BANK_ACCOUNT),
@@ -111,7 +111,7 @@ class RuleBasedDetectorTests(unittest.TestCase):
         self.assert_values(
             "ИНН 7707083894; ИНН 500100732258",
             [EntityType.INN],
-            [],
+            [(EntityType.INN, "7707083894"), (EntityType.INN, "500100732258")],
         )
 
     def test_ogrn_and_ogrnip_control_digits(self) -> None:
@@ -128,7 +128,7 @@ class RuleBasedDetectorTests(unittest.TestCase):
         self.assert_values(
             "ОГРН 1027700132194; ОГРНИП 304500116000156",
             [EntityType.OGRN],
-            [],
+            [(EntityType.OGRN, "1027700132194"), (EntityType.OGRN, "304500116000156")],
         )
 
     def test_account_starting_with_eight_is_not_a_phone(self) -> None:

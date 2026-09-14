@@ -91,6 +91,10 @@ export interface ClarifyingQuestion {
 
   context: string
 
+  reason?: string
+
+  contexts?: Array<{ text: string; location: string; highlight_start: number; highlight_end: number }>
+
   contextLocation?: string
 
   highlightStart?: number

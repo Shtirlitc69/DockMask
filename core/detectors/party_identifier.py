@@ -9,9 +9,7 @@ from core.models import EntityType, Match, PartyRole, TextBlock
 from llm.base import BaseLLMClient
 from llm.request_budget import LLMRequestBudgetError
 
-_PARTY_ENTITY_TYPES = frozenset(
-    {EntityType.ORGANIZATION, EntityType.PERSON_NAME}
-)
+_PARTY_ENTITY_TYPES = frozenset({EntityType.ORGANIZATION, EntityType.PERSON_NAME})
 _SUPPLIER_PATTERN = re.compile(
     r"(?<!\w)(?:поставщик|исполнитель|подрядчик|продавец)(?!\w)",
     re.IGNORECASE,
@@ -59,9 +57,7 @@ def _local_role(text: str, start: int, end: int) -> tuple[PartyRole, bool]:
     if not evidence:
         return PartyRole.UNKNOWN, False
     nearest_distance = min(distance for distance, _ in evidence)
-    nearest_roles = {
-        role for distance, role in evidence if distance == nearest_distance
-    }
+    nearest_roles = {role for distance, role in evidence if distance == nearest_distance}
     if len(nearest_roles) == 1:
         return nearest_roles.pop(), True
     return PartyRole.UNKNOWN, True
@@ -92,6 +88,7 @@ async def identify_parties(
     """Assign party roles in place, preferring deterministic local evidence."""
 
     pending: list[tuple[Match, str, bool]] = []
+    invoice = any(re.search(r"сч[её]т\s+на\s+оплату", b.text, re.IGNORECASE) for b in blocks)
     for index, block in enumerate(blocks):
         if cancel_check is not None:
             cancel_check()
@@ -102,20 +99,36 @@ async def identify_parties(
         for match in matches:
             if match.entity_type not in _PARTY_ENTITY_TYPES:
                 continue
-            if match.party_role is not PartyRole.UNKNOWN:
-                continue
-
             local_role, _ = _local_role(block.text, match.start, match.end)
+            # A table column header is stronger than proximity to another column.
+            header = str(block.context.get("column_header", ""))
+            header_role, _ = _local_role(header, 0, len(header))
+            if header_role is not PartyRole.UNKNOWN:
+                local_role = header_role
+            if (
+                invoice
+                and local_role is PartyRole.UNKNOWN
+                and re.search(
+                    r"(?:\b[рк]\s*/\s*с\b|руководитель|главный бухгалтер)",
+                    block.text,
+                    re.IGNORECASE,
+                )
+                and any(re.match(r"\s*Поставщик\s*:", b.text, re.IGNORECASE) for b in blocks)
+            ):
+                local_role = PartyRole.SUPPLIER
             if local_role is not PartyRole.UNKNOWN:
                 match.party_role = local_role
                 continue
 
-            context_snippet, context_start, context_end = _context(
-                blocks, index, match
-            )
-            local_role, has_markers = _local_role(
-                context_snippet, context_start, context_end
-            )
+            if match.party_role is not PartyRole.UNKNOWN:
+                continue
+
+            # Do not use adjacent table cells as textual context.
+            if block.location.table_index is not None:
+                continue
+
+            context_snippet, context_start, context_end = _context(blocks, index, match)
+            local_role, has_markers = _local_role(context_snippet, context_start, context_end)
             if local_role is not PartyRole.UNKNOWN:
                 match.party_role = local_role
                 continue
@@ -146,19 +159,13 @@ async def identify_parties(
             match.party_role = llm_role
 
     roles_by_entity: dict[tuple[EntityType, str], set[PartyRole]] = {}
-    for match in (
-        item for values in matches_by_block.values() for item in values
-    ):
+    for match in (item for values in matches_by_block.values() for item in values):
         if match.entity_type not in _PARTY_ENTITY_TYPES:
             continue
         if match.party_role is PartyRole.UNKNOWN:
             continue
-        roles_by_entity.setdefault(_entity_key(match), set()).add(
-            match.party_role
-        )
-    for match in (
-        item for values in matches_by_block.values() for item in values
-    ):
+        roles_by_entity.setdefault(_entity_key(match), set()).add(match.party_role)
+    for match in (item for values in matches_by_block.values() for item in values):
         if match.party_role is not PartyRole.UNKNOWN:
             continue
         roles = roles_by_entity.get(_entity_key(match), set())
